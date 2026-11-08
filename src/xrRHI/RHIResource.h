@@ -12,6 +12,7 @@ private:
 	friend class CRHI;
     friend class InternalDevice11;
     friend class InternalDevice12;
+	friend class InternalDeviceVK;
 	RHIObject(void* resource, void (*release)(void*), void (*describe)(void*, RHISampleDesc*) = nullptr);
 	RHIObject(const RHIObject&) = delete;
 	RHIObject& operator=(const RHIObject&) = delete;

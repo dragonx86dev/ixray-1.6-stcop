@@ -508,6 +508,11 @@ CRenderTarget::CRenderTarget()
 	b_ssao = new CBlender_SSAO();
 
 
+	Msg("[CRT] sizes: GetWidth=%u GetHeight=%u GetTargetWidth=%u GetTargetHeight=%u TargetW=%u TargetH=%u psCurrentVidMode=%ux%u",
+	(u32)Cmd.GetWidth(), (u32)Cmd.GetHeight(),
+	(u32)Cmd.GetTargetWidth(), (u32)Cmd.GetTargetHeight(),
+	Device.TargetWidth, Device.TargetHeight,
+	psCurrentVidMode[0], psCurrentVidMode[1]);
 	u32 s_dwWidth = (u32)Cmd.GetWidth(), s_dwHeight = (u32)Cmd.GetHeight();
 
 	// The editor viewport is not the window: depth has to match the viewport targets

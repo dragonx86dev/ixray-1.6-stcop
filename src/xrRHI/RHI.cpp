@@ -1,6 +1,7 @@
 #include "RHI.h"
 
 #include "D3D11/Device.h"
+#include "Vulkan/Device.h"
 #ifdef IXR_WINDOWS
 #include "D3D12/Device.h"
 #endif
@@ -19,20 +20,20 @@
 #include "Private/RHIRenderViewManager.h"
 
 RHI_API u32 g_graphicsAPI = ERHI_API_LAYER::D3D11;
-RHI_API u32 psCurrentVidMode[2] = { 1024,768 };
-RHI_API Flags32 psDeviceFlags = { rsDetails | mtPhysics | mtSound | mtNetwork | rsDrawStatic | rsDrawDynamic | rsDeviceActive | mtParticles
+RHI_API u32 psCurrentVidMode[2] = {1024, 768};
+RHI_API Flags32 psDeviceFlags = {rsDetails | mtPhysics | mtSound | mtNetwork | rsDrawStatic | rsDrawDynamic | rsDeviceActive | mtParticles
 #if defined(IXR_APPLE_SERIES)
-    // The first launch has no user.ltx yet, and the interface only behaves in fullscreen
-    // on macOS, so start there instead of a window.
-    | rsFullscreen
+	// The first launch has no user.ltx yet, and the interface only behaves in fullscreen
+	// on macOS, so start there instead of a window.
+	| rsFullscreen
 #endif
 };
-RHI_API Ivector2 HalfTarget = { 0, 0 };
+RHI_API Ivector2 HalfTarget = {0, 0};
 RHI_API void* g_pAnnotation = nullptr;
 RHI_API CRHI* GRHI = nullptr;
 
 #if defined(IXRAY_PROFILER_TRACY) && defined(IXR_WINDOWS)
-	TracyD3D11Ctx g_tracyD3D11GPUContext = nullptr;
+TracyD3D11Ctx g_tracyD3D11GPUContext = nullptr;
 #endif
 
 CRHI::CRHI()
@@ -72,7 +73,7 @@ IRHIDevice* CRHI::CreateDevice(ERHI_API_LAYER NewAPILevel)
 	}
 #endif
 
-#if defined(IXR_LINUX) 
+#if defined(IXR_LINUX)
 	setenv("DXVK_WSI_DRIVER", "SDL3", 1);
 #endif
 
@@ -91,29 +92,37 @@ IRHIDevice* CRHI::CreateDevice(ERHI_API_LAYER NewAPILevel)
 #endif
 			break;
 		}
-        #ifdef IXR_WINDOWS
-            case ERHI_API_LAYER::D3D12:
-            {
-                auto device = new InternalDevice12;
-                DevicePtr = device;
-                ShaderResourceCache = device->CreateResourceCache();
-                StateManager = device->CreateStateManager();
-                break;
-            }
-        #endif
-        }
+#ifdef IXR_WINDOWS
+		case ERHI_API_LAYER::D3D12:
+		{
+			auto device = new InternalDevice12;
+			DevicePtr = device;
+			ShaderResourceCache = device->CreateResourceCache();
+			StateManager = device->CreateStateManager();
+			break;
+		}
+#endif
+		case ERHI_API_LAYER::VULKAN:
+		{
+			auto device = new InternalDeviceVK;
+			DevicePtr = device;
+			ShaderResourceCache = device->CreateResourceCache();
+			StateManager = device->CreateStateManager();
+			break;
+		}
+	}
 
-    R_ASSERT2(DevicePtr, "Unsupported graphics API");
+	R_ASSERT2(DevicePtr, "Unsupported graphics API");
 
 	return DevicePtr;
 }
 
 void CRHI::BeginFrame()
 {
-    if (DevicePtr)
-    {
-        DevicePtr->BeginFrame();
-    }
+	if (DevicePtr)
+	{
+		DevicePtr->BeginFrame();
+	}
 	if (DriverAntiLag != nullptr)
 	{
 		DriverAntiLag->Update();
@@ -127,12 +136,12 @@ void CRHI::ResizeBuffers(u32 Width, u32 Height)
 
 void* CRHI::GetContext()
 {
-    return DevicePtr ? DevicePtr->GetContext() : nullptr;
+	return DevicePtr ? DevicePtr->GetContext() : nullptr;
 }
 
 void* CRHI::GetSwapchain()
 {
-    return DevicePtr ? DevicePtr->GetSwapchain() : nullptr;
+	return DevicePtr ? DevicePtr->GetSwapchain() : nullptr;
 }
 
 void CRHI::ClearTarget(IRHIRenderTargetView* Target, ERTColor Transparent)
@@ -186,101 +195,111 @@ xr_vector<shared_str> CRHI::DisplaySizeArray()
 		float Aspect = float(W) / float(H);
 
 		// 4:3
-		if (fabs(Aspect - 4.0f / 3.0f) < 0.02f) return true;
+		if (fabs(Aspect - 4.0f / 3.0f) < 0.02f)
+			return true;
 
 		// 5:4
-		if (fabs(Aspect - 5.0f / 4.0f) < 0.02f) return true;
+		if (fabs(Aspect - 5.0f / 4.0f) < 0.02f)
+			return true;
 
 		// 16:9
-		if (fabs(Aspect - 16.0f / 9.0f) < 0.02f) return true;
+		if (fabs(Aspect - 16.0f / 9.0f) < 0.02f)
+			return true;
 
 		// 16:10
-		if (fabs(Aspect - 16.0f / 10.0f) < 0.02f) return true;
+		if (fabs(Aspect - 16.0f / 10.0f) < 0.02f)
+			return true;
 
-		if (Check21x9 && fabs(Aspect - 21.0f / 3.0f) < 0.02f) return true;
+		if (Check21x9 && fabs(Aspect - 21.0f / 3.0f) < 0.02f)
+			return true;
 
 		return false;
 	};
 
-    xr_vector<shared_str> Result = xr_vector<shared_str>();
+	xr_vector<shared_str> Result = xr_vector<shared_str>();
 
-    int NumDisplays = 0;
-    SDL_DisplayID* Displays = SDL_GetDisplays(&NumDisplays);
-    if (!Displays || NumDisplays == 0)
-    {
-        return Result;
-    }
+	int NumDisplays = 0;
+	SDL_DisplayID* Displays = SDL_GetDisplays(&NumDisplays);
+	if (!Displays || NumDisplays == 0)
+	{
+		return Result;
+	}
 
-    xr_vector<Ivector2> Modes;
+	xr_vector<Ivector2> Modes;
 
-    for (int D = 0; D < NumDisplays; ++D)
-    {
-        SDL_DisplayID DisplayID = Displays[D];
+	for (int D = 0; D < NumDisplays; ++D)
+	{
+		SDL_DisplayID DisplayID = Displays[D];
 		const SDL_DisplayMode* DesktopMode = SDL_GetDesktopDisplayMode(DisplayID);
 
 		const float Aspect = float(DesktopMode->w) / float(DesktopMode->h);
 		bool bSupports21by9 = fabs(Aspect - 21.0f / 9.0f) < 0.02f;
 
-        if (DesktopMode == nullptr)
-        {
-            continue;
-        }
+		if (DesktopMode == nullptr)
+		{
+			continue;
+		}
 
-        if (DesktopMode->w < 1024)
-        {
-            continue;
-        }
+		if (DesktopMode->w < 1024)
+		{
+			continue;
+		}
 
-        int NumModes = 0;
-        SDL_DisplayMode** SdlModes = SDL_GetFullscreenDisplayModes(DisplayID, &NumModes);
-        if (SdlModes && NumModes > 0)
-        {
-            for (int I = 0; I < NumModes; ++I)
-            {
-                const SDL_DisplayMode* ModePtr = SdlModes[I];
+		int NumModes = 0;
+		SDL_DisplayMode** SdlModes = SDL_GetFullscreenDisplayModes(DisplayID, &NumModes);
+		if (SdlModes && NumModes > 0)
+		{
+			for (int I = 0; I < NumModes; ++I)
+			{
+				const SDL_DisplayMode* ModePtr = SdlModes[I];
 
-                if (ModePtr->w >= 1024 && ModePtr->w <= DesktopMode->w && ModePtr->h <= DesktopMode->h)
-                {
+				if (ModePtr->w >= 1024 && ModePtr->w <= DesktopMode->w && ModePtr->h <= DesktopMode->h)
+				{
 					if (!IsValidAspectLambda(ModePtr->w, ModePtr->h, bSupports21by9))
 					{
 						continue;
 					}
 
-                    Modes.push_back({ ModePtr->w, ModePtr->h });
-                }
-            }
-            SDL_free(SdlModes);
-        }
+					Modes.push_back({ModePtr->w, ModePtr->h});
+				}
+			}
+			SDL_free(SdlModes);
+		}
 
-        Modes.push_back({ DesktopMode->w, DesktopMode->h });
-    }
+		Modes.push_back({DesktopMode->w, DesktopMode->h});
+	}
 
-    SDL_free(Displays);
+	SDL_free(Displays);
 
-    std::sort(Modes.begin(), Modes.end(), [](const Ivector2& A, const Ivector2& B)
-    {
-        if (A.x == B.x)
-        {
-            return A.y < B.y;
-        }
-        return A.x < B.x;
-    });
+	std::sort(Modes.begin(),
+	          Modes.end(),
+	          [](const Ivector2& A, const Ivector2& B)
+	          {
+		          if (A.x == B.x)
+		          {
+			          return A.y < B.y;
+		          }
+		          return A.x < B.x;
+	          });
 
-    Modes.erase(std::unique(Modes.begin(), Modes.end(), [](const Ivector2& A, const Ivector2& B)
-    {
-        return A.x == B.x && A.y == B.y;
-    }), Modes.end());
+	Modes.erase(std::unique(Modes.begin(),
+	                        Modes.end(),
+	                        [](const Ivector2& A, const Ivector2& B)
+	                        {
+		                        return A.x == B.x && A.y == B.y;
+	                        }),
+	            Modes.end());
 
-    for (const Ivector2& M : Modes)
-    {
-        string32 Str;
-        xr_sprintf(Str, sizeof(Str), "%dx%d", M.x, M.y);
-        Result.push_back(Str);
-    }
+	for (const Ivector2& M : Modes)
+	{
+		string32 Str;
+		xr_sprintf(Str, sizeof(Str), "%dx%d", M.x, M.y);
+		Result.push_back(Str);
+	}
 
 	std::reverse(Result.begin(), Result.end());
 
-    return Result;
+	return Result;
 }
 
 IRHISurface* CRHI::CreateTexture3D(const RHITextureDesc& Desc, RHISubResource* SubResource)
@@ -305,7 +324,7 @@ IRHISurface* CRHI::CreateRenderTarget(const RHITextureDesc& desc)
 
 IRHIShaderResourceView* CRHI::CreateShaderResourceView(IRHIBuffer* Buffer, const RHIShaderResourceViewDesc* desc)
 {
-    return DevicePtr->CreateShaderResourceView(Buffer, desc);
+	return DevicePtr->CreateShaderResourceView(Buffer, desc);
 }
 
 IRHIShaderResourceView* CRHI::CreateShaderResourceView(IRHISurface* Surface, const RHIShaderResourceViewDesc* desc)
@@ -340,7 +359,7 @@ IRHIBuffer* CRHI::CreateBuffer(const RHIBufferDesc& desc, const RHIBufferSubreso
 
 void CRHI::SetConstants(const RHIConstantWrite* Writes, u32 Count)
 {
-    DevicePtr->SetConstants(Writes, Count);
+	DevicePtr->SetConstants(Writes, Count);
 }
 
 void CRHI::GPUStatsBegin() const
@@ -351,10 +370,10 @@ void CRHI::GPUStatsBegin() const
 	}
 
 #ifdef IXR_WINDOWS
-    if (APILevel == ERHI_API_LAYER::D3D12)
-    {
-        static_cast<InternalDevice12*>(DevicePtr)->BeginGPUStats();
-    }
+	if (APILevel == ERHI_API_LAYER::D3D12)
+	{
+		static_cast<InternalDevice12*>(DevicePtr)->BeginGPUStats();
+	}
 #endif
 
 	if (APILevel == ERHI_API_LAYER::D3D11)
@@ -374,10 +393,10 @@ const RHI_GPU_EVENT& CRHI::GPUStats() const
 	}
 
 #ifdef IXR_WINDOWS
-    if (APILevel == ERHI_API_LAYER::D3D12)
-    {
-        return static_cast<InternalDevice12*>(DevicePtr)->GPUStats();
-    }
+	if (APILevel == ERHI_API_LAYER::D3D12)
+	{
+		return static_cast<InternalDevice12*>(DevicePtr)->GPUStats();
+	}
 #endif
 
 	if (APILevel == ERHI_API_LAYER::D3D11)
@@ -393,11 +412,11 @@ const RHI_GPU_EVENT& CRHI::GPUStats() const
 void CRHI::GPUStatsEnd() const
 {
 #ifdef IXR_WINDOWS
-    if (APILevel == ERHI_API_LAYER::D3D12)
-    {
-        static_cast<InternalDevice12*>(DevicePtr)->EndGPUStats();
-        return;
-    }
+	if (APILevel == ERHI_API_LAYER::D3D12)
+	{
+		static_cast<InternalDevice12*>(DevicePtr)->EndGPUStats();
+		return;
+	}
 #endif
 
 	if (APILevel == ERHI_API_LAYER::D3D11)
@@ -435,7 +454,7 @@ void CRHI::DrawIndexedInstanced(u32 IndexCount, u32 InstanceCount, u32 StartInde
 
 void CRHI::ClearIndexBuffer()
 {
-    DevicePtr->ClearIndexBuffer();
+	DevicePtr->ClearIndexBuffer();
 }
 
 bool CRHI::IsTessPass() const
@@ -460,13 +479,13 @@ void CRHI::EvictManagedResources()
 
 void CRHI::SetShader(RHIObject* shader, ERHI_SHADER_TYPE Type)
 {
-    void* nativeShader = shader ? shader->resource : nullptr;
-    if (APILevel != ERHI_API_LAYER::D3D12 && Shaders[(size_t)Type] == nativeShader)
-    {
-        return;
-    }
-    DevicePtr->SetShader(shader, Type);
-    Shaders[(size_t)Type] = nativeShader;
+	void* nativeShader = shader ? shader->resource : nullptr;
+	if (APILevel != ERHI_API_LAYER::D3D12 && Shaders[(size_t)Type] == nativeShader)
+	{
+		return;
+	}
+	DevicePtr->SetShader(shader, Type);
+	Shaders[(size_t)Type] = nativeShader;
 }
 
 void CRHI::SetViewport(RHIViewport& VP)

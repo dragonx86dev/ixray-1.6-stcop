@@ -90,7 +90,23 @@ u32 DLSSWrapper::GetOptimalPresetForScale(float scale, u32 preset)
 void DLSSWrapper::Create()
 {
 	Destroy();
-    DLSS_State.IsD3D12 = GRHI->APILevel == ERHI_API_LAYER::D3D12;
+	// DLSS работает только на D3D11/D3D12. На Vulkan/NOT_CREATED — выходим сразу,
+	// иначе NVSDK_NGX_D3D11_Init получит nullptr в RawDevice и крашнет.
+	if (GRHI->APILevel != ERHI_API_LAYER::D3D11 &&
+		GRHI->APILevel != ERHI_API_LAYER::D3D12)
+	{
+		Msg("* DLSS disabled: API level %d is not D3D11/D3D12",
+			static_cast<int>(GRHI->APILevel));
+		return;
+	}
+
+	if (!GRHI->DevicePtr || !GRHI->DevicePtr->RawDevice)
+	{
+		Msg("* DLSS disabled: RawDevice is null");
+		return;
+	}
+
+	DLSS_State.IsD3D12 = GRHI->APILevel == ERHI_API_LAYER::D3D12;
 
 	if (GRHI->DevicePtr->FeatureLevel < D3D_FEATURE_LEVEL_11_1)
 	{

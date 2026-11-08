@@ -969,6 +969,7 @@ void CCC_Register()
 #ifdef IXR_WINDOWS
             { "d3d12", ERHI_API_LAYER::D3D12 },
 #endif
+			{ "vulkan", ERHI_API_LAYER::VULKAN },
             { nullptr, -1 }
         };
         CMD3(CCC_Token, "renderer_api", &g_graphicsAPI, graphicsAPITokens);

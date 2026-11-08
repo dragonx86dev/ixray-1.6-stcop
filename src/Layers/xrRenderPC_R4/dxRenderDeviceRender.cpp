@@ -342,14 +342,21 @@ void dxRenderDeviceRender::End()
 #if defined(DEBUG_DRAW) && defined(IXR_WINDOWS)
 	{
 		PROF_EVENT("ImGui EndRender");
-		CImGuiManager& MyImGui = CImGuiManager::Instance();
-		MyImGui.BeginRender();
 
-		//Cmd.SetDepthStencil(RDepth);
+		// SetRenderTarget всегда — чтобы финальный RTV был swapchain для present
 		Cmd.SetRenderTarget(RSwapchainTarget, 0, true);
 
-		MyImGui.Render();
-		MyImGui.AfterRender();
+		// ImGui-DX11 backend несовместим с Vulkan:
+		// font atlas не получает TexID (нет ImGui_ImplDX11_CreateFontsTexture),
+		// ImFontAtlasUpdateNewFrame ассертит на TexID == 0 → краш.
+		// Пропускаем весь ImGui-цикл, пока не реализован ImGui_ImplVulkan.
+		if (GRHI->APILevel != ERHI_API_LAYER::VULKAN)
+		{
+			CImGuiManager& MyImGui = CImGuiManager::Instance();
+			MyImGui.BeginRender();
+			MyImGui.Render();
+			MyImGui.AfterRender();
+		}
 
 		DebugRenderImpl.m_lines.resize(0);
 		GRHI->GPUStatsEnd();

@@ -184,6 +184,7 @@ void CRender::create()
 		RainPuddleWater.Build();
 	}
 	Target = new CRenderTarget();	// Main target
+	
 
 	// The editor device owns the model pool and the particle library (see r4_editor.cpp);
 	// without a level the editors also need their own sun.

@@ -127,7 +127,10 @@ int CApplication::BeginPlay()
 #if defined(IXR_APPLE_SERIES)
 	// DXMT presents through its own CAMetalLayer (see MacMetalBridge.mm), no Vulkan surface.
 	WndFlags |= SDL_WINDOW_METAL;
-#elif !defined(IXR_WINDOWS)
+#else
+	// Needed for SDL_Vulkan_CreateSurface. On Windows this is harmless for D3D11/D3D12
+	// because SDL treats SDL_WINDOW_VULKAN as a hint for surface creation; the HWND
+	// is still created normally and SDL_PROP_WINDOW_WIN32_HWND_POINTER works as before.
 	WndFlags |= SDL_WINDOW_VULKAN;
 #endif
 
