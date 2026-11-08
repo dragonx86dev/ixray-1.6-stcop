@@ -1,5 +1,6 @@
 #pragma once
 #include "../RHI.h"
+#include <vulkan/vulkan.h>
 
 // ---- Пустая поверхность ----
 class VkStubSurface final : public IRHISurface
@@ -9,7 +10,7 @@ public:
 
 	void  AddRef() override {}
 	u32   Release() override { return 1; }
-	void* GetRawTexture() override { return nullptr; }
+	void* GetRawTexture() override { return this; }
 
 	u32   GetWidth()  const override { return _desc.Width  ? _desc.Width  : 1; }
 	u32   GetHeight() const override { return _desc.Height ? _desc.Height : 1; }
@@ -26,15 +27,10 @@ public:
 
 	void* Lock(u32 mipLevel = 0, u32* pitch = nullptr) override
 	{
-		// Theora, кубики, скайбоксы и др. делают Lock → memcpy → Unlock.
-		// Без реального VkImage возвращаем CPU-буфер, чтобы данные было куда писать.
-		const u32 w = GetWidth();
-		const u32 h = GetHeight();
-		const u32 rowPitch = w * 4;   // RGBA8 по умолчанию
-		if (_lockedData.empty())
-		{
-			_lockedData.resize(size_t(rowPitch) * h);
-		}
+		const u32 w = std::max<u32>(1, GetWidth() >> mipLevel);
+		const u32 h = std::max<u32>(1, GetHeight() >> mipLevel);
+		const u32 rowPitch = w * 4;
+		_lockedData.resize(size_t(rowPitch) * h);
 		if (pitch) *pitch = rowPitch;
 		return _lockedData.data();
 	}
@@ -89,44 +85,6 @@ public:
     void* GetRaw() override { return this; }
     void  AddRef() override {}
     u32   Release() override { return 1; }
-};
-
-// ---- Пустой буфер ----
-class VkStubBuffer final : public IRHIBuffer
-{
-public:
-	explicit VkStubBuffer(const RHIBufferDesc& d = {})
-		: _desc(d)
-		, _data(d.Size ? d.Size : 1)   // ← реальная память CPU
-	{}
-
-	void  AddRef() override {}
-	u32   Release() override { return 1; }
-	u32   GetSize() const override { return _desc.Size ? _desc.Size : 1; }
-
-	bool  Map(ERHI_BUFFER_MAP, u32, RHIMappedSubresource* out) override
-	{
-		if (out)
-		{
-			out->pData      = _data.data();   // ← валидный указатель
-			out->RowPitch   = _desc.Size;
-			out->DepthPitch = _desc.Size;
-		}
-		return true;
-	}
-
-	void  Unmap() override {}
-	void  UpdateSubresource(const void* data, u32 size, u32 offset = 0) override
-	{
-		if (data && size && offset + size <= _data.size())
-			memcpy(_data.data() + offset, data, size);
-	}
-	void  SetVertexBuffer(u32, u32, u32) override {}
-	void  SetIndexBuffer(bool, u32) override {}
-
-private:
-	RHIBufferDesc _desc;
-	xr_vector<u8> _data;   // ← CPU-память, чтобы Map возвращал валидный pData
 };
 
 // ---- Пустая фабрика ----

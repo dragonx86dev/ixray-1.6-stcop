@@ -4,5 +4,4 @@ class Utils
 {
 public:
 	static bool CheckVulkanVersion();
-	
 };

@@ -9,7 +9,7 @@ struct ImpactInstance
 	float Scale;
 	float2 Padding;
 };
-StructuredBuffer<ImpactInstance> RainInstances;
+StructuredBuffer<ImpactInstance> RainInstances : register(t64);
 
 RainVertex main(PULL_INPUT, uint InstanceID : SV_InstanceID)
 {

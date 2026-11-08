@@ -6,7 +6,7 @@ struct RainInstance
 	float3 Direction;
 	float Speed;
 };
-StructuredBuffer<RainInstance> RainInstances;
+StructuredBuffer<RainInstance> RainInstances : register(t64);
 
 RainVertex main(PULL_INPUT, uint InstanceID : SV_InstanceID)
 {

@@ -2,6 +2,7 @@
 #include "../RHI.h"
 #include <vulkan/vulkan_core.h>
 #include "RHIDevice.h"
+#include "Shader.h"
 
 struct LocalQueueFamilyIndices
 {
@@ -17,6 +18,18 @@ struct LocalQueueFamilyIndices
 class InternalDeviceVK final : public IRHIDevice
 {
 public:
+	struct PipelineKey
+	{
+		VkShaderModule vs = VK_NULL_HANDLE;
+		VkShaderModule ps = VK_NULL_HANDLE;
+		VkShaderModule gs = VK_NULL_HANDLE;
+		VkShaderModule hs = VK_NULL_HANDLE;
+		VkShaderModule ds = VK_NULL_HANDLE;
+		ERHI_PRIMITIVE_TOPOLOGY topology = ERHI_PRIMITIVE_TOPOLOGY::TRIANGLE_LIST;
+		VkFormat rtvFormats[8] = {};
+		u32 rtvCount = 0;
+	};
+	
 	class ContextLock
 	{
 	public:
@@ -128,7 +141,8 @@ private:
 	u32   _imageIndex  = 0;     // индекс текущего swapchain image
 	u64   _frameSerial = 0;     // монотонный счётчик кадров
 	bool  _isRecording = false; // открыт ли command buffer в этом кадре
-	
+
+	static bool IsValidationLayerAvailable();
 	void CreateVulkanInstance();
 	void CreateVulkanSurface();
 	void PickPhysicalDevice();
@@ -138,6 +152,7 @@ private:
 	void CreateSwapchain();
 	void CreateSwapchainImageViews();
 	void CreateFrameResources();
+	void CreateTriangleResources();
 
 	VkInstance _vkInstance = VK_NULL_HANDLE;
 	VkDevice _vkDevice = VK_NULL_HANDLE;
@@ -146,6 +161,7 @@ private:
 	VkQueue _presentVkQueue  = VK_NULL_HANDLE;
 	VkSwapchainKHR _vkSwapchain	= VK_NULL_HANDLE;
 	VkSurfaceKHR _vkSurface = VK_NULL_HANDLE;
+	VkDebugUtilsMessengerEXT _vkDebugMessenger = VK_NULL_HANDLE;
 	
 	VkPipelineCache _vkPipelineCache = VK_NULL_HANDLE;
 
@@ -156,6 +172,30 @@ private:
 
 	xr_vector<VkImage>     _swapchainImages;
 	xr_vector<VkImageView> _swapchainImageViews;
+	
+	VkBuffer         _triangleVB     = VK_NULL_HANDLE;
+	VkDeviceMemory   _triangleVBMem  = VK_NULL_HANDLE;
+	VkPipeline       _trianglePipeline = VK_NULL_HANDLE;
+	VkPipelineLayout _triangleLayout = VK_NULL_HANDLE;
+	
+	
+	
+	CVKShader* _shaders[6] = {};
+	RHIObject* _inputLayout = nullptr;    // сохраняем как есть, layout пока не нужен (UI = vertex pulling)
+	IRHIRenderTargetView* _rtvs[8] = {};
+	u32 _rtvCount = 0;
+	IRHIDepthStencilView* _dsv = nullptr;
+	ERHI_PRIMITIVE_TOPOLOGY _topology = ERHI_PRIMITIVE_TOPOLOGY::TRIANGLE_LIST;
+	RHIViewport _viewport;
+	Irect _scissor;
+	bool _hasScissor = false;
+	u32 _drawConstants[24] = {};   // CBDraw (slot 13 = DrawSlot)
+
+	xr_hash_map<u64, VkPipeline> _pipelineCache;
+	VkPipelineLayout _uiPipelineLayout = VK_NULL_HANDLE;   // layout с push-constants (для будущих UI-шейдеров)
+
+	VkPipeline GetOrCreatePipeline();
+	void       InvalidatePipelineCache();
 	
 	LocalQueueFamilyIndices _queueFamilies;
 	

@@ -214,6 +214,129 @@ HRESULT RHI_DxcCompile(const void* source, size_t size, const char* name, const 
 	return status;
 }
 
+HRESULT RHI_DxcCompileSPIRV(const void* source, size_t size, const char* name, const RHIShaderMacro* macros, IRHIShaderInclude* include,
+	const char* entry, const char* target, u32 flags, RHIBlob** out_code, RHIBlob** out_errors)
+{
+	if (out_code)   *out_code   = nullptr;
+	if (out_errors) *out_errors = nullptr;
+
+	auto& dxc = Dxc();
+	if (!dxc.Compiler)
+		return E_FAIL;
+
+	const std::wstring shaderTarget = std::wstring(1, wchar_t(target[0])) + L"s_6_0";
+
+	// -fvk-invert-y valid only for VS/DS/GS/MS/Lib stages (DXC restriction).
+	const char stage = target[0];
+	const bool needsInvertY = (stage == 'v' || stage == 'd' || stage == 'g' ||
+							   stage == 'm' || stage == 'l');
+
+	std::vector<std::wstring> arguments = {
+		L"-E", std::wstring(entry, entry + strlen(entry)),
+		L"-T", shaderTarget,
+		L"-HV", L"2018",
+		L"-flegacy-resource-reservation",
+		L"-spirv",
+		L"-fvk-use-dx-layout",
+	};
+	if (needsInvertY)
+	{
+		arguments.push_back(L"-fvk-invert-y");
+	}
+
+	// Фиксированные binding'ы (см. CreateUIDescriptorSetLayout в Vulkan/Device.cpp):
+	//   b0..b13   → set 0, binding 0..13    (UniformBuffer)
+	//   t0..t56   → set 0, binding 14..70   (SampledImage)
+	//   t57..t63  → set 0, binding 71..77   (StructuredBuffer → SSBO)
+	//   s0..s15   → set 0, binding 78..93   (Sampler)
+	auto addBinding = [&arguments](const wchar_t* prefix, int reg, int binding)
+	{
+		std::wstring regName = prefix;
+		regName += std::to_wstring(reg);
+		arguments.push_back(L"-fvk-bind-register");
+		arguments.push_back(regName);
+		arguments.push_back(L"0");
+		arguments.push_back(std::to_wstring(binding));
+		arguments.push_back(L"1");
+	};
+
+	for (int i = 0; i < 14; ++i) addBinding(L"b", i, i);        // cbuffers
+	for (int i = 0; i < 57; ++i) addBinding(L"t", i, 14 + i);   // sampled images
+	for (int i = 57; i < 64; ++i) addBinding(L"t", i, 14 + i);  // structured buffers (t57..t63)
+	for (int i = 0; i < 16; ++i) addBinding(L"s", i, 78 + i);   // samplers
+	for (int i = 0; i < 8;  ++i) addBinding(L"u", i, 94 + i);   // UAV
+	for (int i = 64; i < 72; ++i) addBinding(L"t", i, 102 + (i - 64)); // StorageBuffer 
+
+	if (flags & RHI_SHADER_PACK_MATRIX_ROW_MAJOR)
+		arguments.push_back(L"-Zpr");
+	if (flags & RHI_SHADER_SKIP_OPTIMIZATION)
+		arguments.push_back(L"-Od");
+	else if (flags & RHI_SHADER_OPTIMIZATION_LEVEL3)
+		arguments.push_back(L"-O3");
+	if (flags & RHI_SHADER_DEBUG)
+	{
+		arguments.push_back(L"-Zi");
+		arguments.push_back(L"-Qembed_debug");
+	}
+
+	for (u32 macro_idx = 0; macros && macros[macro_idx].Name; ++macro_idx)
+	{
+		const std::string define = std::string("-D") + macros[macro_idx].Name + "=" + (macros[macro_idx].Definition ? macros[macro_idx].Definition : "1");
+		arguments.emplace_back(define.begin(), define.end());
+	}
+
+	std::vector<LPCWSTR> pointers;
+	pointers.reserve(arguments.size());
+	for (const auto& argument : arguments)
+		pointers.push_back(argument.c_str());
+
+	std::string expanded;
+	xr_vector<std::string> stack;
+	ExpandIncludes(include, static_cast<const char*>(source), size, name, expanded, stack);
+
+	DxcBuffer buffer = { expanded.data(), expanded.size(), DXC_CP_ACP };
+
+	IDxcResult* result = nullptr;
+	HRESULT status = dxc.Compiler->Compile(&buffer, pointers.data(), UINT32(pointers.size()), nullptr, IID_PPV_ARGS(&result));
+	if (SUCCEEDED(status))
+		result->GetStatus(&status);
+
+	IDxcBlobUtf8* errors = nullptr;
+	if (result && FAILED(status) && SUCCEEDED(result->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(&errors), nullptr)) && errors && errors->GetStringLength())
+	{
+		if (out_errors)
+			*out_errors = MakeBlob(errors->GetStringPointer(), errors->GetStringLength() + 1);
+	}
+
+	IDxcBlob* object = nullptr;
+	if (SUCCEEDED(status) && SUCCEEDED(result->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&object), nullptr)) && object)
+	{
+		const bool isSpirv =
+			object->GetBufferSize() >= 4 &&
+			*reinterpret_cast<const u32*>(object->GetBufferPointer()) == 0x07230203; // SPIR-V magic
+
+		if (!isSpirv)
+		{
+			Msg("! DXC did not produce SPIR-V for '%s' (entry='%s', target='%s', size=%zu)",
+				name, entry, target, size_t(object->GetBufferSize()));
+			status = E_FAIL;
+		}
+		else if (out_code)
+		{
+			*out_code = MakeBlob(object->GetBufferPointer(), object->GetBufferSize());
+		}
+	}
+	else if (SUCCEEDED(status))
+	{
+		status = E_FAIL;
+	}
+
+	if (object) object->Release();
+	if (errors) errors->Release();
+	if (result) result->Release();
+	return status;
+}
+
 HRESULT RHI_DxcReflect(const void* code, size_t size, ID3D12ShaderReflection** out_reflection)
 {
 	auto& dxc = Dxc();

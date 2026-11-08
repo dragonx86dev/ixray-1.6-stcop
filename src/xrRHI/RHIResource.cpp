@@ -134,6 +134,14 @@ HRESULT
 CRHI::CompileShader(const void* source, size_t size, const char* name, const RHIShaderMacro* macros,
 	IRHIShaderInclude* include, const char* entry, const char* target, u32 flags, RHIBlob** out_code, RHIBlob** out_errors)
 {
+	if (GRHI && GRHI->APILevel == ERHI_API_LAYER::VULKAN)
+	{
+		*out_code = *out_errors = nullptr;
+		const HRESULT dxc = RHI_DxcCompileSPIRV(source, size, name, macros, include, entry, target, flags, out_code, out_errors);
+		if (SUCCEEDED(dxc) || (out_errors && *out_errors))
+			return dxc;
+	}
+	
 	if (UsesDXIL(target[0])) {
 		*out_code = *out_errors = nullptr;
 		const HRESULT dxc = RHI_DxcCompile(source, size, name, macros, include, entry, target, flags, out_code, out_errors);

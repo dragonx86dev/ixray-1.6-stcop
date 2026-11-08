@@ -1,10 +1,13 @@
 #include "Device.h"
-
-#include <SDL3/SDL_vulkan.h>
-
+#include "Shader.h"
 #include "State.h"
 #include "Utils.h"
+#include "Buffer.h"
 #include "VkStubs.h"
+
+#include <SDL3/SDL_vulkan.h>
+#include <vulkan/vulkan_core.h>
+
 
 inline void VkCheck(VkResult result, const char* what)
 {
@@ -24,6 +27,25 @@ static void VkStubNoopRelease(void*) {}
 static void DeleteRhiBlendDesc(void* p)
 {
 	xr_delete(static_cast<RHIBlendDesc*>(p));
+}
+
+static void DeleteShader(void* payload)
+{
+	// delete static_cast<CVKShader*>(payload);
+	xr_delete(static_cast<CVKShader*>(payload));
+}
+
+static VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugCallback(
+	VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+	VkDebugUtilsMessageTypeFlagsEXT /*type*/,
+	const VkDebugUtilsMessengerCallbackDataEXT* data,
+	void* /*userData*/)
+{
+	if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
+		Msg("! [VK-ERR] %s", data->pMessage);
+	else if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
+		Msg("! [VK-WRN] %s", data->pMessage);
+	return VK_FALSE;
 }
 
 // Постоянные stub-объекты (живут всю жизнь движка)
@@ -58,6 +80,7 @@ InternalDeviceVK::InternalDeviceVK()
 	CreateSwapchain();
 	CreateSwapchainImageViews();
 	CreateFrameResources();
+	CreateTriangleResources();
 
 	// --- IRHIDevice defaults ---
 	FeatureLevel = RHI_FEATURE_LEVEL_11_1;
@@ -67,33 +90,99 @@ InternalDeviceVK::InternalDeviceVK()
 	Msg("* [Vulkan] Vulkan device initialized");
 }
 
+bool InternalDeviceVK::IsValidationLayerAvailable()
+{
+	u32 layerCount = 0;
+	if (vkEnumerateInstanceLayerProperties(&layerCount, nullptr) != VK_SUCCESS || layerCount == 0)
+		return false;
+
+	xr_vector<VkLayerProperties> layers(layerCount);
+	if (vkEnumerateInstanceLayerProperties(&layerCount, layers.data()) != VK_SUCCESS)
+		return false;
+
+	for (const auto& layer : layers)
+	{
+		if (strcmp(layer.layerName, "VK_LAYER_KHRONOS_validation") == 0)
+			return true;
+	}
+	return false;
+}
+
 void InternalDeviceVK::CreateVulkanInstance()
 {
-	PROF_EVENT("Vulkan: CreateInstance");
+    PROF_EVENT("Vulkan: CreateInstance");
 
-	VkApplicationInfo appInfo = {};
-	appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-	appInfo.pApplicationName = "IX-Ray Engine";
-	appInfo.applicationVersion = VK_MAKE_API_VERSION(0, 1, 4, 0);
-	appInfo.apiVersion = VK_API_VERSION_1_4;
+    VkApplicationInfo appInfo = {};
+    appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    appInfo.pApplicationName = "IX-Ray Engine";
+    appInfo.applicationVersion = VK_MAKE_API_VERSION(0, 1, 4, 0);
+    appInfo.apiVersion = VK_API_VERSION_1_4;
 
-	u32 extensionsCount = 0;
-	const auto sdlExtensions = SDL_Vulkan_GetInstanceExtensions(&extensionsCount);
-	R_ASSERT2(sdlExtensions && extensionsCount > 0, "SDL_Vulkan_GetInstanceExtensions failed");
+    u32 extensionsCount = 0;
+    const auto sdlExtensions = SDL_Vulkan_GetInstanceExtensions(&extensionsCount);
+    R_ASSERT2(sdlExtensions && extensionsCount > 0, "SDL_Vulkan_GetInstanceExtensions failed");
 
-	const xr_vector<const char*> extensions(sdlExtensions, sdlExtensions + extensionsCount);
+    // was `const xr_vector<...>` - убираем const, чтобы можно было push_back
+    xr_vector<const char*> extensions(sdlExtensions, sdlExtensions + extensionsCount);
 
-	VkInstanceCreateInfo createInfo = {};
-	createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-	createInfo.pApplicationInfo = &appInfo;
-	createInfo.enabledExtensionCount = static_cast<u32>(extensions.size());
-	createInfo.ppEnabledExtensionNames = extensions.data();
+	static constexpr const char* kValidationLayer = "VK_LAYER_KHRONOS_validation";
+
+	const bool wantValidation = Core.ParamsData.test(ECoreParams::dxdebug);
+	const bool hasValidation  = wantValidation && IsValidationLayerAvailable();
+	const bool enableValidation = hasValidation; // = wantValidation && layerAvailable
+
+	if (wantValidation && !hasValidation)
+	{
+		Msg("! [VK] Validation requested (-dxdebug) but '%s' is not installed. "
+			"Install Vulkan SDK: https://vulkan.lunarg.com/sdk/home", kValidationLayer);
+	}
+	else if (hasValidation)
+	{
+		extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+		Msg("* [VK] Validation layers: enabled");
+	}
+
+
+    VkInstanceCreateInfo createInfo = {};
+    createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    createInfo.pApplicationInfo = &appInfo;
+    createInfo.enabledExtensionCount = static_cast<u32>(extensions.size());
+    createInfo.ppEnabledExtensionNames = extensions.data();
+
+    if (enableValidation)
+    {
+        createInfo.enabledLayerCount = 1;
+        createInfo.ppEnabledLayerNames = &kValidationLayer;
+    }
 
 #if defined(IXR_APPLE_SERIES)
-	createInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    createInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
 #endif
 
-	VkCheck(vkCreateInstance(&createInfo, nullptr, &_vkInstance), "vkCreateInstance");
+    VkCheck(vkCreateInstance(&createInfo, nullptr, &_vkInstance), "vkCreateInstance");
+
+	if (enableValidation)
+	{
+		auto createMessenger = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
+			vkGetInstanceProcAddr(_vkInstance, "vkCreateDebugUtilsMessengerEXT"));
+
+		if (createMessenger)
+		{
+			VkDebugUtilsMessengerCreateInfoEXT messengerInfo = {};
+			messengerInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+			messengerInfo.messageSeverity =
+				VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT |
+				VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT;
+			messengerInfo.messageType =
+				VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+				VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+				VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+			messengerInfo.pfnUserCallback = VulkanDebugCallback;
+
+			VkCheck(createMessenger(_vkInstance, &messengerInfo, nullptr, &_vkDebugMessenger),
+				"vkCreateDebugUtilsMessengerEXT");
+		}
+	}
 }
 
 void InternalDeviceVK::CreateVulkanSurface()
@@ -526,30 +615,594 @@ void InternalDeviceVK::CreateFrameResources()
 	}
 }
 
+void InternalDeviceVK::CreateTriangleResources()
+{
+    PROF_EVENT("Vulkan: CreateTriangleResources");
+
+    // ---- Загрузка SPIR-V ----
+	auto loadSpirv = [](const char* name) -> xr_vector<u8>
+	{
+		string_path path;
+		FS.update_path(path, "$game_shaders$", (xr_string("vk\\") + name).c_str());
+
+		Msg("* [VK] Loading SPIR-V: %s", path);   // для отладки — сразу видно, куда лезем
+
+		IReader* reader = FS.r_open(path);
+		if (!reader)
+		{
+			Msg("! [VK] Cannot open SPIR-V: %s", path);
+			return {};
+		}
+
+		xr_vector<u8> data(reader->length());
+		reader->r(data.data(), reader->length());
+		FS.r_close(reader);
+		return data;
+	};
+
+    auto vsData = loadSpirv("triangle_vs.spv");
+    auto psData = loadSpirv("triangle_ps.spv");
+    R_ASSERT3(!vsData.empty() && !psData.empty(),
+        "Triangle SPIR-V not found. Put triangle_vs.spv/triangle_ps.spv into gamedata/shaders_vk/",
+        "");
+    R_ASSERT2((vsData.size() % 4 == 0) && (psData.size() % 4 == 0),
+        "SPIR-V size must be a multiple of 4");
+
+    VkShaderModuleCreateInfo vsInfo = {};
+    vsInfo.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    vsInfo.codeSize = vsData.size();
+    vsInfo.pCode    = reinterpret_cast<const u32*>(vsData.data());
+
+    VkShaderModule vsModule = VK_NULL_HANDLE;
+    VkCheck(vkCreateShaderModule(_vkDevice, &vsInfo, nullptr, &vsModule),
+        "vkCreateShaderModule (triangle VS)");
+
+    VkShaderModuleCreateInfo psInfo = {};
+    psInfo.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    psInfo.codeSize = psData.size();
+    psInfo.pCode    = reinterpret_cast<const u32*>(psData.data());
+
+    VkShaderModule psModule = VK_NULL_HANDLE;
+    VkCheck(vkCreateShaderModule(_vkDevice, &psInfo, nullptr, &psModule),
+        "vkCreateShaderModule (triangle PS)");
+
+    // ---- Pipeline layout (пустой) ----
+    VkPipelineLayoutCreateInfo layoutInfo = {};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    VkCheck(vkCreatePipelineLayout(_vkDevice, &layoutInfo, nullptr, &_triangleLayout),
+        "vkCreatePipelineLayout (triangle)");
+
+    // ---- Vertex buffer (3 вершины) ----
+    struct Vertex { float pos[3]; float color[3]; };
+    const Vertex verts[3] = {
+        { {  0.0f, -0.5f, 0.0f }, { 1.0f, 0.0f, 0.0f } }, // низ, красный
+        { {  0.5f,  0.5f, 0.0f }, { 0.0f, 1.0f, 0.0f } }, // правый верх, зелёный
+        { { -0.5f,  0.5f, 0.0f }, { 0.0f, 0.0f, 1.0f } }, // левый верх, синий
+    };
+    const VkDeviceSize vbSize = sizeof(verts);
+
+    VkBufferCreateInfo vbInfo = {};
+    vbInfo.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    vbInfo.size        = vbSize;
+    vbInfo.usage       = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    vbInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkCheck(vkCreateBuffer(_vkDevice, &vbInfo, nullptr, &_triangleVB),
+        "vkCreateBuffer (triangle)");
+
+    VkMemoryRequirements memReq = {};
+    vkGetBufferMemoryRequirements(_vkDevice, _triangleVB, &memReq);
+
+    VkPhysicalDeviceMemoryProperties memProps = {};
+    vkGetPhysicalDeviceMemoryProperties(_vkPhysicalDevice, &memProps);
+
+    const VkMemoryPropertyFlags required =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+
+    u32 memTypeIdx = UINT32_MAX;
+    for (u32 i = 0; i < memProps.memoryTypeCount; ++i)
+    {
+        if ((memReq.memoryTypeBits & (1u << i)) &&
+            (memProps.memoryTypes[i].propertyFlags & required) == required)
+        {
+            memTypeIdx = i;
+            break;
+        }
+    }
+    R_ASSERT2(memTypeIdx != UINT32_MAX, "No HOST_VISIBLE|HOST_COHERENT memory type for triangle VB");
+
+    VkMemoryAllocateInfo allocInfo = {};
+    allocInfo.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize  = memReq.size;
+    allocInfo.memoryTypeIndex = memTypeIdx;
+    VkCheck(vkAllocateMemory(_vkDevice, &allocInfo, nullptr, &_triangleVBMem),
+        "vkAllocateMemory (triangle)");
+    VkCheck(vkBindBufferMemory(_vkDevice, _triangleVB, _triangleVBMem, 0),
+        "vkBindBufferMemory (triangle)");
+
+    void* mapped = nullptr;
+    VkCheck(vkMapMemory(_vkDevice, _triangleVBMem, 0, vbSize, 0, &mapped),
+        "vkMapMemory (triangle)");
+    memcpy(mapped, verts, vbSize);
+    vkUnmapMemory(_vkDevice, _triangleVBMem); // HOST_COHERENT → flush не нужен
+
+    // ---- Pipeline ----
+    VkPipelineShaderStageCreateInfo stages[2] = {};
+    stages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vsModule;
+    stages[0].pName  = "main";
+
+    stages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = psModule;
+    stages[1].pName  = "main";
+
+    VkVertexInputBindingDescription binding = {};
+    binding.binding   = 0;
+    binding.stride    = sizeof(Vertex);
+    binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    VkVertexInputAttributeDescription attrs[2] = {};
+    attrs[0].location = 0;
+    attrs[0].binding  = 0;
+    attrs[0].format   = VK_FORMAT_R32G32B32_SFLOAT;
+    attrs[0].offset   = offsetof(Vertex, pos);
+
+    attrs[1].location = 1;
+    attrs[1].binding  = 0;
+    attrs[1].format   = VK_FORMAT_R32G32B32_SFLOAT;
+    attrs[1].offset   = offsetof(Vertex, color);
+
+    VkPipelineVertexInputStateCreateInfo vertexInput = {};
+    vertexInput.sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertexInput.vertexBindingDescriptionCount   = 1;
+    vertexInput.pVertexBindingDescriptions      = &binding;
+    vertexInput.vertexAttributeDescriptionCount = 2;
+    vertexInput.pVertexAttributeDescriptions    = attrs;
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly = {};
+    inputAssembly.sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo viewportState = {};
+    viewportState.sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.scissorCount  = 1;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer = {};
+    rasterizer.sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.cullMode    = VK_CULL_MODE_NONE;
+    rasterizer.frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rasterizer.lineWidth   = 1.0f;
+
+    VkPipelineMultisampleStateCreateInfo multisampling = {};
+    multisampling.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineColorBlendAttachmentState blendAttachment = {};
+    blendAttachment.colorWriteMask =
+        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    blendAttachment.blendEnable = VK_FALSE;
+
+    VkPipelineColorBlendStateCreateInfo colorBlend = {};
+    colorBlend.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlend.attachmentCount = 1;
+    colorBlend.pAttachments    = &blendAttachment;
+
+    VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dynamicState = {};
+    dynamicState.sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicState.dynamicStateCount = 2;
+    dynamicState.pDynamicStates    = dynamicStates;
+
+    // Dynamic rendering: формат обязателен, layout НЕ указывается (он в VkRenderingAttachmentInfo)
+    VkPipelineRenderingCreateInfo renderingInfo = {};
+    renderingInfo.sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    renderingInfo.colorAttachmentCount    = 1;
+    renderingInfo.pColorAttachmentFormats = &_swapchainFormat;
+    renderingInfo.depthAttachmentFormat   = VK_FORMAT_UNDEFINED;
+    renderingInfo.stencilAttachmentFormat = VK_FORMAT_UNDEFINED;
+
+    VkGraphicsPipelineCreateInfo pipelineInfo = {};
+    pipelineInfo.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineInfo.pNext               = &renderingInfo;
+    pipelineInfo.stageCount          = 2;
+    pipelineInfo.pStages             = stages;
+    pipelineInfo.pVertexInputState   = &vertexInput;
+    pipelineInfo.pInputAssemblyState = &inputAssembly;
+    pipelineInfo.pViewportState      = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState   = &multisampling;
+    pipelineInfo.pColorBlendState    = &colorBlend;
+    pipelineInfo.pDynamicState       = &dynamicState;
+    pipelineInfo.layout              = _triangleLayout;
+    pipelineInfo.renderPass          = VK_NULL_HANDLE;
+    pipelineInfo.subpass             = 0;
+
+    VkCheck(vkCreateGraphicsPipelines(_vkDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &_trianglePipeline),
+        "vkCreateGraphicsPipelines (triangle)");
+
+    vkDestroyShaderModule(_vkDevice, vsModule, nullptr);
+    vkDestroyShaderModule(_vkDevice, psModule, nullptr);
+
+    Msg("* [VK] Triangle resources created (format %d, %ux%u)",
+        (int)_swapchainFormat, _swapchainExtent.width, _swapchainExtent.height);
+}
+
+static u64 HashPipelineKey(const InternalDeviceVK::PipelineKey& key)
+{
+    // FNV-1a по байтам
+    const u8* p = reinterpret_cast<const u8*>(&key);
+    u64 h = 14695981039346656037ull;
+    for (size_t i = 0; i < sizeof(key); ++i)
+    {
+        h ^= p[i];
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+VkPipeline InternalDeviceVK::GetOrCreatePipeline()
+{
+    // --- Проверки готовности ---
+    CVKShader* vs = _shaders[(u32)ERHI_SHADER_TYPE::VS];
+    CVKShader* ps = _shaders[(u32)ERHI_SHADER_TYPE::PS];
+    if (!vs || !vs->isSpirV) return VK_NULL_HANDLE;
+    if (!ps || !ps->isSpirV) return VK_NULL_HANDLE;
+    if (_rtvCount == 0)      return VK_NULL_HANDLE;
+
+    // --- Ключ ---
+    PipelineKey key = {};
+    key.vs = vs->module;
+    key.ps = ps->module;
+    if (_shaders[(u32)ERHI_SHADER_TYPE::GS]) key.gs = _shaders[(u32)ERHI_SHADER_TYPE::GS]->module;
+    if (_shaders[(u32)ERHI_SHADER_TYPE::HS]) key.hs = _shaders[(u32)ERHI_SHADER_TYPE::HS]->module;
+    if (_shaders[(u32)ERHI_SHADER_TYPE::DS]) key.ds = _shaders[(u32)ERHI_SHADER_TYPE::DS]->module;
+    key.topology = _topology;
+    key.rtvCount = _rtvCount;
+
+    // Формат RTV: из swapchain-формата, если RTV == SwapChainRTV (мы сейчас не различаем RTV по объектам —
+    // в 2.5 сделаем CVKRenderTargetView с реальным VkFormat, сейчас хак для MVP)
+    for (u32 i = 0; i < _rtvCount; ++i)
+        key.rtvFormats[i] = _swapchainFormat;
+
+    const u64 hash = HashPipelineKey(key);
+    auto it = _pipelineCache.find(hash);
+    if (it != _pipelineCache.end())
+        return it->second;
+
+    // --- Создание layout (один на все UI pipeline) ---
+    if (_uiPipelineLayout == VK_NULL_HANDLE)
+    {
+        VkPushConstantRange range = {};
+        range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        range.offset = 0;
+        range.size   = sizeof(_drawConstants); // 24 dword = 96 bytes
+
+        VkPipelineLayoutCreateInfo layoutInfo = {};
+        layoutInfo.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        layoutInfo.pushConstantRangeCount = 1;
+        layoutInfo.pPushConstantRanges    = &range;
+
+        VkResult r = vkCreatePipelineLayout(_vkDevice, &layoutInfo, nullptr, &_uiPipelineLayout);
+        if (r != VK_SUCCESS)
+        {
+            Msg("! [VK] vkCreatePipelineLayout (UI) failed: %d", (int)r);
+            return VK_NULL_HANDLE;
+        }
+    }
+
+    // --- Shader stages ---
+    xr_vector<VkPipelineShaderStageCreateInfo> stages;
+    stages.reserve(5);
+
+    auto addStage = [&](VkShaderModule mod, VkShaderStageFlagBits bit)
+    {
+        if (mod == VK_NULL_HANDLE) return;
+        VkPipelineShaderStageCreateInfo s = {};
+        s.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        s.stage  = bit;
+        s.module = mod;
+        s.pName  = "main";
+        stages.push_back(s);
+    };
+    addStage(key.vs, VK_SHADER_STAGE_VERTEX_BIT);
+    addStage(key.ps, VK_SHADER_STAGE_FRAGMENT_BIT);
+    addStage(key.gs, VK_SHADER_STAGE_GEOMETRY_BIT);
+    addStage(key.hs, VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT);
+    addStage(key.ds, VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT);
+
+    // --- Vertex input: пустой (UI = vertex pulling) ---
+    VkPipelineVertexInputStateCreateInfo vertexInput = {};
+    vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+    // --- Input assembly ---
+    VkPrimitiveTopology vkTopo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    switch (_topology)
+    {
+    case ERHI_PRIMITIVE_TOPOLOGY::POINT_LIST:     vkTopo = VK_PRIMITIVE_TOPOLOGY_POINT_LIST; break;
+    case ERHI_PRIMITIVE_TOPOLOGY::LINE_LIST:      vkTopo = VK_PRIMITIVE_TOPOLOGY_LINE_LIST; break;
+    case ERHI_PRIMITIVE_TOPOLOGY::LINE_STRIP:     vkTopo = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP; break;
+    case ERHI_PRIMITIVE_TOPOLOGY::TRIANGLE_STRIP: vkTopo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;
+    case ERHI_PRIMITIVE_TOPOLOGY::TRIANGLE_FAN:   vkTopo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;
+    case ERHI_PRIMITIVE_TOPOLOGY::CONTROL_POINT_3_PATCH: vkTopo = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST; break;
+    default: vkTopo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; break;
+    }
+
+    VkPipelineInputAssemblyStateCreateInfo ia = {};
+    ia.sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    ia.topology = vkTopo;
+
+    // --- Viewport / scissor (dynamic) ---
+    VkPipelineViewportStateCreateInfo vp = {};
+    vp.sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    vp.viewportCount = 1;
+    vp.scissorCount  = 1;
+
+    // --- Rasterizer ---
+    VkPipelineRasterizationStateCreateInfo rast = {};
+    rast.sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rast.polygonMode = VK_POLYGON_MODE_FILL;
+    rast.cullMode    = VK_CULL_MODE_NONE;
+    rast.frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rast.lineWidth   = 1.0f;
+
+    // --- Multisample ---
+    VkPipelineMultisampleStateCreateInfo ms = {};
+    ms.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    // --- Blend: стандартный UI (SRC_ALPHA, ONE_MINUS_SRC_ALPHA) ---
+    VkPipelineColorBlendAttachmentState blendAtt = {};
+    blendAtt.blendEnable    = VK_TRUE;
+    blendAtt.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    blendAtt.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    blendAtt.colorBlendOp   = VK_BLEND_OP_ADD;
+    blendAtt.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    blendAtt.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    blendAtt.alphaBlendOp   = VK_BLEND_OP_ADD;
+    blendAtt.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                              VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+    VkPipelineColorBlendStateCreateInfo blend = {};
+    blend.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    blend.attachmentCount = 1;
+    blend.pAttachments    = &blendAtt;
+
+    // --- Dynamic states ---
+    VkDynamicState dyn[] = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR,
+    };
+    VkPipelineDynamicStateCreateInfo dynState = {};
+    dynState.sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynState.dynamicStateCount = 2;
+    dynState.pDynamicStates    = dyn;
+
+    // --- Rendering info (dynamic rendering) ---
+    VkPipelineRenderingCreateInfo renderingInfo = {};
+    renderingInfo.sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    renderingInfo.colorAttachmentCount    = _rtvCount;
+    renderingInfo.pColorAttachmentFormats = key.rtvFormats;
+    renderingInfo.depthAttachmentFormat   = VK_FORMAT_UNDEFINED;
+    renderingInfo.stencilAttachmentFormat = VK_FORMAT_UNDEFINED;
+
+    // --- Pipeline ---
+    VkGraphicsPipelineCreateInfo info = {};
+    info.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    info.pNext               = &renderingInfo;
+    info.stageCount          = (u32)stages.size();
+    info.pStages             = stages.data();
+    info.pVertexInputState   = &vertexInput;
+    info.pInputAssemblyState = &ia;
+    info.pViewportState      = &vp;
+    info.pRasterizationState = &rast;
+    info.pMultisampleState   = &ms;
+    info.pColorBlendState    = &blend;
+    info.pDynamicState       = &dynState;
+    info.layout              = _uiPipelineLayout;
+    info.renderPass          = VK_NULL_HANDLE;
+
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkResult r = vkCreateGraphicsPipelines(_vkDevice, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline);
+    if (r != VK_SUCCESS)
+    {
+        Msg("! [VK] vkCreateGraphicsPipelines (UI) failed: %d (vs=%p ps=%p topo=%d rtvCount=%u)",
+            (int)r, (void*)key.vs, (void*)key.ps, (u32)key.topology, key.rtvCount);
+        return VK_NULL_HANDLE;
+    }
+
+    _pipelineCache[hash] = pipeline;
+    Msg("* [VK] UI pipeline created (vs=%p ps=%p topo=%d rtvCount=%u)",
+        (void*)key.vs, (void*)key.ps, (u32)key.topology, key.rtvCount);
+    return pipeline;
+}
+
+void InternalDeviceVK::InvalidatePipelineCache()
+{
+    for (auto& it : _pipelineCache)
+        if (it.second != VK_NULL_HANDLE)
+            vkDestroyPipeline(_vkDevice, it.second, nullptr);
+    _pipelineCache.clear();
+}
+
 // =====================================================================
 // Все draw / state / bind - no-op заглушки.
 // Никаких Msg, чтобы не засорять лог в render-loop.
 // =====================================================================
 
-void InternalDeviceVK::SetPrimitiveTopology(ERHI_PRIMITIVE_TOPOLOGY) {}
-void InternalDeviceVK::Draw(u32, u32) {}
-void InternalDeviceVK::DrawIndexed(u32, u32, u32) {}
-void InternalDeviceVK::DrawInstanced(u32, u32, u32, u32) {}
-void InternalDeviceVK::DrawIndexedInstanced(u32, u32, u32, u32, u32) {}
+void InternalDeviceVK::SetPrimitiveTopology(ERHI_PRIMITIVE_TOPOLOGY topology)
+{
+	_topology = topology;
+}
+
+static u32 g_drawSkipped = 0;
+static u32 g_drawCalls = 0;
+
+void InternalDeviceVK::Draw(u32 VertexCount, u32 StartVertex)
+{
+    if (VertexCount == 0 || !_isRecording) return;
+    VkPipeline pipe = GetOrCreatePipeline();
+    if (pipe == VK_NULL_HANDLE) { ++g_drawSkipped; return; }
+
+    VkCommandBuffer cmd = _frames[_frame].CommandBuffer;
+
+    VkViewport vp = { _viewport.TopLeftX, _viewport.TopLeftY,
+                      _viewport.Width, _viewport.Height,
+                      _viewport.MinDepth, _viewport.MaxDepth };
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+
+    VkRect2D sc = {};
+    if (_hasScissor)
+        sc = { { _scissor.x1, _scissor.y1 }, { (u32)(_scissor.x2 - _scissor.x1), (u32)(_scissor.y2 - _scissor.y1) } };
+    else
+        sc = { { 0, 0 }, _swapchainExtent };
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    vkCmdPushConstants(cmd, _uiPipelineLayout,
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        0, sizeof(_drawConstants), _drawConstants);
+    vkCmdDraw(cmd, VertexCount, 1, StartVertex, 0);
+    ++g_drawCalls;
+}
+
+void InternalDeviceVK::DrawInstanced(u32 VertexCount, u32 InstanceCount, u32 StartVertex, u32 StartInstance)
+{
+    if (VertexCount == 0 || InstanceCount == 0 || !_isRecording) return;
+    VkPipeline pipe = GetOrCreatePipeline();
+    if (pipe == VK_NULL_HANDLE) { ++g_drawSkipped; return; }
+
+    VkCommandBuffer cmd = _frames[_frame].CommandBuffer;
+    VkViewport vp = { _viewport.TopLeftX, _viewport.TopLeftY,
+                      _viewport.Width, _viewport.Height,
+                      _viewport.MinDepth, _viewport.MaxDepth };
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    VkRect2D sc = _hasScissor
+        ? VkRect2D{ { _scissor.x1, _scissor.y1 }, { (u32)(_scissor.x2 - _scissor.x1), (u32)(_scissor.y2 - _scissor.y1) } }
+        : VkRect2D{ { 0, 0 }, _swapchainExtent };
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    vkCmdPushConstants(cmd, _uiPipelineLayout,
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        0, sizeof(_drawConstants), _drawConstants);
+    vkCmdDraw(cmd, VertexCount, InstanceCount, StartVertex, StartInstance);
+    ++g_drawCalls;
+}
+
+void InternalDeviceVK::DrawIndexed(u32 IndexCount, u32 StartIndex, u32 BaseVertex)
+{
+    if (IndexCount == 0 || !_isRecording) return;
+    VkPipeline pipe = GetOrCreatePipeline();
+    if (pipe == VK_NULL_HANDLE) { ++g_drawSkipped; return; }
+
+    VkCommandBuffer cmd = _frames[_frame].CommandBuffer;
+    VkViewport vp = { _viewport.TopLeftX, _viewport.TopLeftY,
+                      _viewport.Width, _viewport.Height,
+                      _viewport.MinDepth, _viewport.MaxDepth };
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    VkRect2D sc = _hasScissor
+        ? VkRect2D{ { _scissor.x1, _scissor.y1 }, { (u32)(_scissor.x2 - _scissor.x1), (u32)(_scissor.y2 - _scissor.y1) } }
+        : VkRect2D{ { 0, 0 }, _swapchainExtent };
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    vkCmdPushConstants(cmd, _uiPipelineLayout,
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        0, sizeof(_drawConstants), _drawConstants);
+    vkCmdDrawIndexed(cmd, IndexCount, 1, StartIndex, (s32)BaseVertex, 0);
+    ++g_drawCalls;
+}
+
+void InternalDeviceVK::DrawIndexedInstanced(u32 IndexCount, u32 InstanceCount, u32 StartIndex, u32 BaseVertex, u32 StartInstance)
+{
+    if (IndexCount == 0 || InstanceCount == 0 || !_isRecording) return;
+    VkPipeline pipe = GetOrCreatePipeline();
+    if (pipe == VK_NULL_HANDLE) { ++g_drawSkipped; return; }
+
+    VkCommandBuffer cmd = _frames[_frame].CommandBuffer;
+    VkViewport vp = { _viewport.TopLeftX, _viewport.TopLeftY,
+                      _viewport.Width, _viewport.Height,
+                      _viewport.MinDepth, _viewport.MaxDepth };
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    VkRect2D sc = _hasScissor
+        ? VkRect2D{ { _scissor.x1, _scissor.y1 }, { (u32)(_scissor.x2 - _scissor.x1), (u32)(_scissor.y2 - _scissor.y1) } }
+        : VkRect2D{ { 0, 0 }, _swapchainExtent };
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    vkCmdPushConstants(cmd, _uiPipelineLayout,
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        0, sizeof(_drawConstants), _drawConstants);
+    vkCmdDrawIndexed(cmd, IndexCount, InstanceCount, StartIndex, (s32)BaseVertex, StartInstance);
+    ++g_drawCalls;
+}
+
+
 void InternalDeviceVK::ClearTarget(void*, ERTColor) {}
 void InternalDeviceVK::ClearTarget(void*, const float*) {}
 void InternalDeviceVK::ClearDepthStencil(IRHIDepthStencilView*, ERHI_CLEAR_TARGET, float, u8) {}
 void InternalDeviceVK::GenerateMips(IRHIShaderResourceView*) {}
 void InternalDeviceVK::CopySurface(IRHISurface*, IRHISurface*) {}
 void InternalDeviceVK::CopySurface(IRHIRenderTargetView*, IRHIRenderTargetView*) {}
-void InternalDeviceVK::SetViewport(RHIViewport&) {}
-void InternalDeviceVK::SetScissorRect(Irect*) {}
-void InternalDeviceVK::SetRenderTargets(u32, IRHIRenderTargetView* const*, IRHIUnorderedAccessView* const*) {}
-void InternalDeviceVK::SetDSV(IRHIDepthStencilView*) {}
-void InternalDeviceVK::SetConstants(const RHIConstantWrite*, u32) {}
+
+void InternalDeviceVK::SetViewport(RHIViewport& VP)
+{
+	_viewport = VP;
+}
+
+void InternalDeviceVK::SetScissorRect(Irect* R)
+{
+	if (R)
+	{
+		_scissor = *R;
+		_hasScissor = true;
+	}
+	else
+		_hasScissor = false;
+}
+
+void InternalDeviceVK::SetRenderTargets(u32 NumViews, IRHIRenderTargetView* const* ppRenderTargetViews, IRHIUnorderedAccessView* const* /*ppRenderUAViews*/)
+{
+	_rtvCount = NumViews < 8 ? NumViews : 8;
+	for (u32 i = 0; i < 8; ++i)
+		_rtvs[i] = (i < _rtvCount && ppRenderTargetViews) ? ppRenderTargetViews[i] : nullptr;
+}
+
+void InternalDeviceVK::SetDSV(IRHIDepthStencilView* pDepthStencilView)
+{
+	_dsv = pDepthStencilView;
+}
+
+void InternalDeviceVK::SetConstants(const RHIConstantWrite* Writes, u32 Count)
+{
+	if (!Writes) return;
+	for (u32 i = 0; i < Count; ++i)
+	{
+		const u32 slot = Writes[i].Slot;
+		// Для UI нужен только DrawSlot = 13 (CBDraw: draw_flags, draw_vertex_base, ...).
+		// Остальные слоты (CBView, CBFrame, ...) будем привязывать через UBO в шаге 2.6.
+		if (slot == 13 && Writes[i].Data && Writes[i].Size <= sizeof(_drawConstants))
+			memcpy(_drawConstants, Writes[i].Data, Writes[i].Size);
+	}
+}
+
 void InternalDeviceVK::ClearIndexBuffer() {}
-void InternalDeviceVK::SetShader(RHIObject*, ERHI_SHADER_TYPE) {}
-void InternalDeviceVK::SetInputLayout(RHIObject*) {}
+
+void InternalDeviceVK::SetShader(RHIObject* shader, ERHI_SHADER_TYPE type)
+{
+	auto* vkShader = shader ? static_cast<CVKShader*>(shader->resource) : nullptr;
+	_shaders[(u32)type] = vkShader;
+}
+
+void InternalDeviceVK::SetInputLayout(RHIObject* layout)
+{
+	_inputLayout = layout;
+}
+
 void InternalDeviceVK::Dispatch(u32, u32, u32) {}
 void InternalDeviceVK::SetSamplers(RHIObject* const*, u32) {}
 void InternalDeviceVK::SetComputeResources(u32, u32, IRHIShaderResourceView* const*) {}
@@ -644,6 +1297,8 @@ void InternalDeviceVK::Present()
 
 	Frame& f = _frames[_frame];
 	_isRecording = false;
+	
+	vkCmdEndRendering(f.CommandBuffer);
 
 	VkImageMemoryBarrier2 barrier{};
 	barrier.sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
@@ -661,6 +1316,13 @@ void InternalDeviceVK::Present()
 	dep.imageMemoryBarrierCount = 1;
 	dep.pImageMemoryBarriers    = &barrier;
 	vkCmdPipelineBarrier2(f.CommandBuffer, &dep);
+	
+	if ((_frame % 60) == 0 && (g_drawCalls || g_drawSkipped))
+	{
+		Msg("* [VK] Draw stats (frame %u): draws=%u skipped=%u", _frame, g_drawCalls, g_drawSkipped);
+		g_drawCalls = 0;
+		g_drawSkipped = 0;
+	}
 
 	VkCheck(vkEndCommandBuffer(f.CommandBuffer), "vkEndCommandBuffer");
 
@@ -721,9 +1383,9 @@ IRHITextureFactory* InternalDeviceVK::GetTextureFactory()
 	return &g_VkStubTextureFactory;
 }
 
-IRHIBuffer* InternalDeviceVK::CreateBuffer(const RHIBufferDesc& desc, const RHIBufferSubresource*)
+IRHIBuffer* InternalDeviceVK::CreateBuffer(const RHIBufferDesc& desc, const RHIBufferSubresource* pSubresource)
 {
-	return new VkStubBuffer(desc);
+	return new CVKBuffer(_vkDevice, _vkPhysicalDevice, desc, pSubresource);
 }
 
 bool InternalDeviceVK::ReadRenderTargetPixels(IRHIRenderTargetView*, void*, u32, u32&, u32&, u32&)
@@ -804,7 +1466,7 @@ void InternalDeviceVK::BeginFrame()
 	colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 	colorAttachment.loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR;
 	colorAttachment.storeOp     = VK_ATTACHMENT_STORE_OP_STORE;
-	colorAttachment.clearValue.color = { { 0.2f, 0.3f, 0.4f, 1.0f } };
+	colorAttachment.clearValue.color = { { 0.0f, 0.3f, 0.4f, 1.0f } };
 
 	VkRenderingInfo renderInfo{};
 	renderInfo.sType                = VK_STRUCTURE_TYPE_RENDERING_INFO;
@@ -814,7 +1476,31 @@ void InternalDeviceVK::BeginFrame()
 	renderInfo.pColorAttachments    = &colorAttachment;
 
 	vkCmdBeginRendering(f.CommandBuffer, &renderInfo);
-	vkCmdEndRendering(f.CommandBuffer);
+	
+	// --- MVP: тестовый треугольник ---
+	if (_trianglePipeline != VK_NULL_HANDLE)
+	{
+		vkCmdBindPipeline(f.CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, _trianglePipeline);
+		VkDeviceSize vbOffset = 0;
+		vkCmdBindVertexBuffers(f.CommandBuffer, 0, 1, &_triangleVB, &vbOffset);
+
+		// Треугольник 1 — левая половина
+		VkViewport vp1 = { 0.0f, 0.0f,
+			_swapchainExtent.width * 0.5f, (float)_swapchainExtent.height, 0.0f, 1.0f };
+		VkRect2D sc1 = { { 0, 0 }, { _swapchainExtent.width / 2, _swapchainExtent.height } };
+		vkCmdSetViewport(f.CommandBuffer, 0, 1, &vp1);
+		vkCmdSetScissor (f.CommandBuffer, 0, 1, &sc1);
+		vkCmdDraw(f.CommandBuffer, 3, 1, 0, 0);
+
+		// Треугольник 2 — правая половина
+		VkViewport vp2 = { (float)_swapchainExtent.width * 0.5f, 0.0f,
+			_swapchainExtent.width * 0.5f, (float)_swapchainExtent.height, 0.0f, 1.0f };
+		VkRect2D sc2 = { { (int)(_swapchainExtent.width / 2), 0 },
+						 { _swapchainExtent.width / 2, _swapchainExtent.height } };
+		vkCmdSetViewport(f.CommandBuffer, 0, 1, &vp2);
+		vkCmdSetScissor (f.CommandBuffer, 0, 1, &sc2);
+		vkCmdDraw(f.CommandBuffer, 3, 1, 0, 0);
+	}
 }
 
 IRHIShaderResourceView* InternalDeviceVK::CreateShaderResourceView(IRHIBuffer*, const RHIShaderResourceViewDesc*)
@@ -827,17 +1513,91 @@ IRHIUnorderedAccessView* InternalDeviceVK::CreateUAV(IRHIBuffer*, const RHIUAVDe
 	return new VkStubUAV();
 }
 
-HRESULT InternalDeviceVK::LoadDDS(const void*, size_t, ERHI_USAGE, u32, ERHI_CPU_ACCESS_FLAG, int&, bool, IRHISurface** out_surface)
+HRESULT InternalDeviceVK::LoadDDS(const void* data, size_t size, ERHI_USAGE usage,
+	u32 bind_flags, ERHI_CPU_ACCESS_FLAG cpu_flags, int& lod, bool fallback,
+	IRHISurface** out_surface)
 {
-	if (out_surface) *out_surface = new VkStubSurface();
+	*out_surface = nullptr;
+	if (!data || !size)
+	{
+		return E_INVALIDARG;
+	}
+
+	RHITextureMetadata meta{};
+	HRESULT hr = GRHI->GetDDSMetadata(data, size, meta);
+	if (FAILED(hr))
+	{
+		return hr;
+	}
+
+	// Учёт lod для мип-цепочки (как в D3D11/D3D12 LoadDDS)
+	if (!meta.cubemap && !meta.volumemap && lod)
+	{
+		while (meta.mipmap_count > 1 && meta.width > 4 && meta.height > 4 && lod)
+		{
+			meta.width  /= 2;
+			meta.height /= 2;
+			--meta.mipmap_count;
+			--lod;
+		}
+		meta.width  = std::max<u32>(meta.width,  4);
+		meta.height = std::max<u32>(meta.height, 4);
+	}
+
+	RHITextureDesc desc(meta.width, meta.height, (ERHI_FORMAT)meta.format);
+	desc.MipLevels  = meta.mipmap_count ? meta.mipmap_count : 1;
+	desc.ArraySize  = meta.cubemap ? 6 : (meta.volumemap ? 1 : 1);
+	desc.Depth      = meta.volumemap ? std::max<u32>(meta.height, 1) : 1;  // поправь, если нужен реальный depth из метаданных
+	desc.BindFlags  = (ERHI_BIND_FLAG)bind_flags;
+	desc.Usage      = usage;
+	desc.CPUAccessFlags = (u32)cpu_flags;
+	desc.MiscFlags  = meta.cubemap ? 0x4 /* D3D11_RESOURCE_MISC_TEXTURECUBE */ : 0;
+
+	*out_surface = new VkStubSurface(desc);
 	return S_OK;
 }
 
-HRESULT InternalDeviceVK::CreateShader(const void*, size_t, ERHI_SHADER_TYPE, RHIObject** out_shader)
+HRESULT InternalDeviceVK::CreateShader(const void* code, size_t size, ERHI_SHADER_TYPE type, RHIObject** out_shader)
 {
-	if (out_shader) *out_shader = new RHIObject(nullptr, VkStubNoopRelease);
+	*out_shader = nullptr;
+
+	if (!code || size < 4)
+		return E_INVALIDARG;
+
+	const u32 magic = *static_cast<const u32*>(code);
+	const bool isSpirV = (magic == 0x07230203);
+
+	if (!isSpirV)
+	{
+		// DXBC или что-то ещё — пока не умеем. Возвращаем stub, движок не упадёт.
+		Msg("* [VK] CreateShader: non-SPIR-V for type=%d size=%u, returning stub",
+			(u32)type, (u32)size);
+		auto* shader = new CVKShader(_vkDevice, VK_NULL_HANDLE, type, false);
+		*out_shader = new RHIObject(shader, DeleteShader);
+		return S_OK;
+	}
+
+	VkShaderModuleCreateInfo info = {};
+	info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+	info.codeSize = size;
+	info.pCode    = static_cast<const u32*>(code);
+
+	VkShaderModule module = VK_NULL_HANDLE;
+	VkResult r = vkCreateShaderModule(_vkDevice, &info, nullptr, &module);
+	if (r != VK_SUCCESS)
+	{
+		Msg("! [VK] vkCreateShaderModule failed (type=%d, size=%u, r=%d)",
+			(u32)type, (u32)size, (int)r);
+		auto* shader = new CVKShader(_vkDevice, VK_NULL_HANDLE, type, false);
+		*out_shader = new RHIObject(shader, DeleteShader);
+		return E_FAIL;
+	}
+
+	auto* shader = new CVKShader(_vkDevice, module, type, true);
+	*out_shader = new RHIObject(shader, DeleteShader);
 	return S_OK;
 }
+
 
 HRESULT InternalDeviceVK::ReplaceShader(RHIObject*, const void*, size_t)
 {
@@ -952,8 +1712,32 @@ InternalDeviceVK::~InternalDeviceVK()
 
 	if (_vkPipelineCache != VK_NULL_HANDLE) vkDestroyPipelineCache(_vkDevice, _vkPipelineCache, nullptr);
 
+	if (_trianglePipeline != VK_NULL_HANDLE) vkDestroyPipeline(_vkDevice, _trianglePipeline, nullptr);
+	if (_triangleLayout   != VK_NULL_HANDLE) vkDestroyPipelineLayout(_vkDevice, _triangleLayout, nullptr);
+	if (_triangleVB       != VK_NULL_HANDLE) vkDestroyBuffer(_vkDevice, _triangleVB, nullptr);
+	if (_triangleVBMem    != VK_NULL_HANDLE) vkFreeMemory(_vkDevice, _triangleVBMem, nullptr);
+	
+	if (_uiPipelineLayout != VK_NULL_HANDLE)
+	{
+		vkDestroyPipelineLayout(_vkDevice, _uiPipelineLayout, nullptr);
+		_uiPipelineLayout = VK_NULL_HANDLE;
+	}
+	InvalidatePipelineCache();
+	
 	vkDestroyDevice(_vkDevice, nullptr);
 	_vkDevice = VK_NULL_HANDLE;
+
+	// --- Validation messenger (до destroy instance!) ---
+	if (_vkDebugMessenger != VK_NULL_HANDLE)
+	{
+		auto destroyMessenger = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
+			vkGetInstanceProcAddr(_vkInstance, "vkDestroyDebugUtilsMessengerEXT"));
+
+		if (destroyMessenger)
+			destroyMessenger(_vkInstance, _vkDebugMessenger, nullptr);
+
+		_vkDebugMessenger = VK_NULL_HANDLE;
+	}
 
 	if (_vkSurface  != VK_NULL_HANDLE) vkDestroySurfaceKHR(_vkInstance, _vkSurface, nullptr);
 	if (_vkInstance != VK_NULL_HANDLE) vkDestroyInstance(_vkInstance, nullptr);
