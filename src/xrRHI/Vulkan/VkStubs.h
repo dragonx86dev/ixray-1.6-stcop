@@ -5,25 +5,45 @@
 class VkStubSurface final : public IRHISurface
 {
 public:
-    explicit VkStubSurface(const RHITextureDesc& d = {}) : _desc(d) {}
-    void  AddRef() override {}
-    u32   Release() override { return 1; }
-    void* GetRawTexture() override { return nullptr; }
-    u32   GetWidth() const override { return _desc.Width ? _desc.Width : 1; }
-    u32   GetHeight() const override { return _desc.Height ? _desc.Height : 1; }
-    u32   GetDepth() const override { return 1; }
-    u32   GetMipLevels() const override { return 1; }
-    ERHI_RESOURCE_DIMENSION GetTextureType() const override { return ERHI_RESOURCE_DIMENSION::TEXTURE2D; }
-    u32   GetMiscFlags() const override { return 0; }
-    u32   GetSampleDescCount() const override { return 1; }
-    u32   GetArraySize() const override { return 1; }
-    ERHI_FORMAT GetFormat() const override { return _desc.Format; }
-    ERHI_USAGE  GetUsage() const override { return _desc.Usage; }
-    bool  UpdateData(u32, u32, const RHISubResource*, const RHIBox&) override { return true; }
-    void* Lock(u32, u32*) override { return nullptr; }
-    void  Unlock() override {}
+	explicit VkStubSurface(const RHITextureDesc& d = {}) : _desc(d) {}
+
+	void  AddRef() override {}
+	u32   Release() override { return 1; }
+	void* GetRawTexture() override { return nullptr; }
+
+	u32   GetWidth()  const override { return _desc.Width  ? _desc.Width  : 1; }
+	u32   GetHeight() const override { return _desc.Height ? _desc.Height : 1; }
+	u32   GetDepth()  const override { return 1; }
+	u32   GetMipLevels() const override { return 1; }
+	ERHI_RESOURCE_DIMENSION GetTextureType() const override { return ERHI_RESOURCE_DIMENSION::TEXTURE2D; }
+	u32   GetMiscFlags() const override { return 0; }
+	u32   GetSampleDescCount() const override { return 1; }
+	u32   GetArraySize() const override { return 1; }
+	ERHI_FORMAT GetFormat() const override { return _desc.Format; }
+	ERHI_USAGE  GetUsage() const override { return _desc.Usage; }
+
+	bool UpdateData(u32, u32, const RHISubResource*, const RHIBox&) override { return true; }
+
+	void* Lock(u32 mipLevel = 0, u32* pitch = nullptr) override
+	{
+		// Theora, кубики, скайбоксы и др. делают Lock → memcpy → Unlock.
+		// Без реального VkImage возвращаем CPU-буфер, чтобы данные было куда писать.
+		const u32 w = GetWidth();
+		const u32 h = GetHeight();
+		const u32 rowPitch = w * 4;   // RGBA8 по умолчанию
+		if (_lockedData.empty())
+		{
+			_lockedData.resize(size_t(rowPitch) * h);
+		}
+		if (pitch) *pitch = rowPitch;
+		return _lockedData.data();
+	}
+
+	void Unlock() override { _lockedData.clear(); }
+
 private:
-    RHITextureDesc _desc;
+	RHITextureDesc _desc;
+	xr_vector<u8>  _lockedData;   // ← CPU-память под Lock/Unlock
 };
 
 // ---- Пустой SRV ----
