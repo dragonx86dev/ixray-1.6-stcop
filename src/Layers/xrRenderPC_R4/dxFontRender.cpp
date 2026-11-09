@@ -73,9 +73,10 @@ void dxFontRender::CreateFontAtlas(u32 width, u32 height, const char* name, void
 	rhiDesc.CPUAccessFlags = 0;
 	rhiDesc.MiscFlags = 0;
 
-	RHISubResource FontData;
-	FontData.Data = bitmap;
-	FontData.DataSize = width * 4;
+	RHISubResource FontData = {}; 
+	FontData.Data      = bitmap;
+	FontData.RowPitch  = width * 4;                // <-- Явно задаем размер строки
+	FontData.DataSize = width * height * 4;         // <-- ИСПРАВЛЕНО: полный размер атласа
 
 	IRHISurface* rhiSurface = GRHI->CreateTexture2D(rhiDesc, FontData);
 	if (!rhiSurface)
