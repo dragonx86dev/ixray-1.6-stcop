@@ -109,6 +109,25 @@ CRHI::CreateBlob(size_t size, RHIBlob** out_blob)
 HRESULT
 CRHI::GetInputSignature(const void* code, size_t size, RHIBlob** out_blob)
 {
+	if (out_blob) {
+		*out_blob = nullptr;
+	}
+	if (!code || size < 4) {
+		return E_INVALIDARG;
+	}
+
+	// Vulkan: SPIR-V не содержит D3D input signature. Pull-шейдер
+	// (pull_reference.vs.hlsl) и вообще UI-шейдеры X-Ray используют только
+	// системные семантики (SV_VertexID/SV_InstanceID), т.е. input signature
+	// для них пустой по определению. Отдаём тот же буфер — валидация
+	// layout'а в Vulkan-ветке CreateInputLayout всё равно no-op.
+	if (GRHI && GRHI->APILevel == ERHI_API_LAYER::VULKAN) {
+		auto copy = new RHIBlob(size);
+		memcpy(copy->GetBufferPointer(), code, size);
+		*out_blob = copy;
+		return S_OK;
+	}
+
 	ID3DBlob* blob = nullptr;
 	HRESULT result = D3DGetInputSignatureBlob(code, size, &blob);
 	if (FAILED(result) && RHI_IsDXIL(code, size)) {

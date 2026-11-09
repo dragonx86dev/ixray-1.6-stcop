@@ -8,6 +8,8 @@
 #include <SDL3/SDL_vulkan.h>
 #include <vulkan/vulkan_core.h>
 
+#include "Bindings.h"
+
 
 inline void VkCheck(VkResult result, const char* what)
 {
@@ -77,6 +79,11 @@ InternalDeviceVK::InternalDeviceVK()
 	CreateLogicalDevice();
 
 	CreatePipelineCache();
+	CreateDescriptorSetLayout();   // ← NEW
+	CreateDummyResources();        // ← NEW
+	CreateDescriptorPool();        // ← NEW
+	InitDummyDescriptorSet();      // ← NEW
+	UpdatePipelineLayout();        // ← NEW (до CreateTriangleResources)
 	CreateSwapchain();
 	CreateSwapchainImageViews();
 	CreateFrameResources();
@@ -535,6 +542,7 @@ void InternalDeviceVK::CreateSwapchain()
 	colorDesc.SampleDescCount = 1;
 
 	auto* colorSurface = new VkStubSurface(colorDesc);
+	
 	RenderRTV       = new VkStubRTV(colorSurface);
 	RenderTexture   = RenderRTV;
 	RenderSRV       = new VkStubSRV();
@@ -831,6 +839,381 @@ void InternalDeviceVK::CreateTriangleResources()
         (int)_swapchainFormat, _swapchainExtent.width, _swapchainExtent.height);
 }
 
+void InternalDeviceVK::CreateDescriptorSetLayout()
+{
+	PROF_EVENT("Vulkan: CreateDescriptorSetLayout");
+
+	xr_vector<VkDescriptorSetLayoutBinding> bindings;
+	bindings.reserve(СVKBindings::TotalBindings);
+
+	auto add = [&](u32 binding, VkDescriptorType type)
+	{
+		VkDescriptorSetLayoutBinding b{};
+		b.binding         = binding;
+		b.descriptorType  = type;
+		b.descriptorCount = 1;
+		b.stageFlags      = VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_COMPUTE_BIT;
+		bindings.push_back(b);
+	};
+
+	for (u32 i = 0; i < СVKBindings::CBCount;      ++i) add(СVKBindings::CBBase       + i, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+	for (u32 i = 0; i < СVKBindings::SrvCount;     ++i) add(СVKBindings::SrvBase      + i, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE);
+	for (u32 i = 0; i < СVKBindings::SsboCount;    ++i) add(СVKBindings::SsboBase     + i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+	for (u32 i = 0; i < СVKBindings::SamplerCount; ++i) add(СVKBindings::SamplerBase  + i, VK_DESCRIPTOR_TYPE_SAMPLER);
+	for (u32 i = 0; i < СVKBindings::UavCount;     ++i) add(СVKBindings::UavBase      + i, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+	for (u32 i = 0; i < СVKBindings::UserSsboCount;++i) add(СVKBindings::UserSsboBase + i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+
+	VkDescriptorSetLayoutCreateInfo info{};
+	info.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+	info.bindingCount = static_cast<u32>(bindings.size());
+	info.pBindings    = bindings.data();
+
+	VkCheck(vkCreateDescriptorSetLayout(_vkDevice, &info, nullptr, &_setLayout),
+			"vkCreateDescriptorSetLayout");
+
+	Msg("* [VK] Descriptor set layout: %u bindings", static_cast<u32>(bindings.size()));
+}
+
+void InternalDeviceVK::CreateDummyResources()
+{
+    PROF_EVENT("Vulkan: CreateDummyResources");
+
+    VkPhysicalDeviceMemoryProperties memProps{};
+    vkGetPhysicalDeviceMemoryProperties(_vkPhysicalDevice, &memProps);
+
+    auto pickMemory = [&](u32 typeBits, VkMemoryPropertyFlags want) -> u32
+    {
+        for (u32 i = 0; i < memProps.memoryTypeCount; ++i)
+        {
+            if ((typeBits & (1u << i)) && (memProps.memoryTypes[i].propertyFlags & want) == want)
+                return i;
+        }
+        return UINT32_MAX;
+    };
+
+    // --- 1x1 RGBA8 dummy image: используется и как SampledImage (t*), и как StorageImage (u*) ---
+    {
+        VkImageCreateInfo ii{};
+        ii.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        ii.imageType     = VK_IMAGE_TYPE_2D;
+        ii.format        = VK_FORMAT_R8G8B8A8_UNORM;
+        ii.extent        = { 1, 1, 1 };
+        ii.mipLevels     = 1;
+        ii.arrayLayers   = 1;
+        ii.samples       = VK_SAMPLE_COUNT_1_BIT;
+        ii.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        ii.usage         = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        ii.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+        ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VkCheck(vkCreateImage(_vkDevice, &ii, nullptr, &_dummyImage), "vkCreateImage (dummy)");
+
+        VkMemoryRequirements req{};
+        vkGetImageMemoryRequirements(_vkDevice, _dummyImage, &req);
+        const u32 typeIdx = pickMemory(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        R_ASSERT2(typeIdx != UINT32_MAX, "No device-local memory for dummy image");
+
+        VkMemoryAllocateInfo ai{};
+        ai.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        ai.allocationSize  = req.size;
+        ai.memoryTypeIndex = typeIdx;
+        VkCheck(vkAllocateMemory(_vkDevice, &ai, nullptr, &_dummyImageMem), "vkAllocateMemory (dummy image)");
+        VkCheck(vkBindImageMemory(_vkDevice, _dummyImage, _dummyImageMem, 0), "vkBindImageMemory (dummy)");
+
+        // One-shot upload:
+        //   UNDEFINED -> TRANSFER_DST_OPTIMAL -> clear white -> GENERAL
+        // Final layout is GENERAL because the same image is bound both as SampledImage (t*)
+        // and StorageImage (u*), and InitDummyDescriptorSet writes it with VK_IMAGE_LAYOUT_GENERAL.
+        VkCommandPool pool = VK_NULL_HANDLE;
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+
+        VkCommandPoolCreateInfo pci{};
+        pci.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        pci.queueFamilyIndex = _queueFamilies.Graphics;
+        VkCheck(vkCreateCommandPool(_vkDevice, &pci, nullptr, &pool), "vkCreateCommandPool (dummy)");
+
+        VkCommandBufferAllocateInfo cbi{};
+        cbi.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cbi.commandPool        = pool;
+        cbi.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbi.commandBufferCount = 1;
+        VkCheck(vkAllocateCommandBuffers(_vkDevice, &cbi, &cmd), "vkAllocateCommandBuffers (dummy)");
+
+        VkCommandBufferBeginInfo bi{};
+        bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        VkCheck(vkBeginCommandBuffer(cmd, &bi), "vkBeginCommandBuffer (dummy)");
+
+        const VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+        // 1) UNDEFINED -> TRANSFER_DST_OPTIMAL
+        VkImageMemoryBarrier2 b2{};
+        b2.sType             = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        b2.oldLayout         = VK_IMAGE_LAYOUT_UNDEFINED;
+        b2.newLayout         = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        b2.srcStageMask      = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+        b2.srcAccessMask     = VK_ACCESS_2_NONE;
+        b2.dstStageMask      = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        b2.dstAccessMask     = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        b2.image             = _dummyImage;
+        b2.subresourceRange  = range;
+
+        VkDependencyInfo di{};
+        di.sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        di.imageMemoryBarrierCount = 1;
+        di.pImageMemoryBarriers    = &b2;
+        vkCmdPipelineBarrier2(cmd, &di);
+
+        // 2) Clear in TRANSFER_DST_OPTIMAL
+        VkClearColorValue white{};
+        white.float32[0] = white.float32[1] = white.float32[2] = white.float32[3] = 1.f;
+        vkCmdClearColorImage(cmd, _dummyImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &white, 1, &range);
+
+        // 3) TRANSFER_DST_OPTIMAL -> GENERAL
+        b2 = {};
+        b2.sType             = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        b2.oldLayout         = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        b2.newLayout         = VK_IMAGE_LAYOUT_GENERAL;
+        b2.srcStageMask      = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        b2.srcAccessMask     = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        b2.dstStageMask      = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        b2.dstAccessMask     = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
+        b2.image             = _dummyImage;
+        b2.subresourceRange  = range;
+
+        di = {};
+        di.sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        di.imageMemoryBarrierCount = 1;
+        di.pImageMemoryBarriers    = &b2;
+        vkCmdPipelineBarrier2(cmd, &di);
+
+        VkCheck(vkEndCommandBuffer(cmd), "vkEndCommandBuffer (dummy)");
+
+        VkCommandBufferSubmitInfo cbsi{};
+        cbsi.sType         = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+        cbsi.commandBuffer = cmd;
+
+        VkSubmitInfo2 si{};
+        si.sType                  = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+        si.commandBufferInfoCount = 1;
+        si.pCommandBufferInfos    = &cbsi;
+        VkCheck(vkQueueSubmit2(_graphicsVkQueue, 1, &si, VK_NULL_HANDLE), "vkQueueSubmit2 (dummy)");
+        vkDeviceWaitIdle(_vkDevice);
+
+        vkDestroyCommandPool(_vkDevice, pool, nullptr);
+
+        VkImageViewCreateInfo vi{};
+        vi.sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        vi.image    = _dummyImage;
+        vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vi.format   = VK_FORMAT_R8G8B8A8_UNORM;
+        vi.subresourceRange = range;
+        VkCheck(vkCreateImageView(_vkDevice, &vi, nullptr, &_dummyImageView), "vkCreateImageView (dummy)");
+    }
+
+    // --- Dummy UBO (4096 байт) ---
+    {
+        VkBufferCreateInfo bi{};
+        bi.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bi.size        = 4096;
+        bi.usage       = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+        bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        VkCheck(vkCreateBuffer(_vkDevice, &bi, nullptr, &_dummyUBO), "vkCreateBuffer (dummy UBO)");
+
+        VkMemoryRequirements req{};
+        vkGetBufferMemoryRequirements(_vkDevice, _dummyUBO, &req);
+        const u32 typeIdx = pickMemory(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        R_ASSERT2(typeIdx != UINT32_MAX, "No host-visible memory for dummy UBO");
+
+        VkMemoryAllocateInfo ai{};
+        ai.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        ai.allocationSize  = req.size;
+        ai.memoryTypeIndex = typeIdx;
+        VkCheck(vkAllocateMemory(_vkDevice, &ai, nullptr, &_dummyUBOMem), "vkAllocateMemory (dummy UBO)");
+        VkCheck(vkBindBufferMemory(_vkDevice, _dummyUBO, _dummyUBOMem, 0), "vkBindBufferMemory (dummy UBO)");
+
+        void* mapped = nullptr;
+        VkCheck(vkMapMemory(_vkDevice, _dummyUBOMem, 0, VK_WHOLE_SIZE, 0, &mapped), "vkMapMemory (dummy UBO)");
+        memset(mapped, 0, 4096);
+        vkUnmapMemory(_vkDevice, _dummyUBOMem);
+    }
+
+    // --- Dummy SSBO (256 байт) — используется и для geometry (t57..t63), и для user-structured (t64..t71) ---
+    {
+        VkBufferCreateInfo bi{};
+        bi.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bi.size        = 256;
+        bi.usage       = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        VkCheck(vkCreateBuffer(_vkDevice, &bi, nullptr, &_dummySSBO), "vkCreateBuffer (dummy SSBO)");
+
+        VkMemoryRequirements req{};
+        vkGetBufferMemoryRequirements(_vkDevice, _dummySSBO, &req);
+        const u32 typeIdx = pickMemory(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        R_ASSERT2(typeIdx != UINT32_MAX, "No host-visible memory for dummy SSBO");
+
+        VkMemoryAllocateInfo ai{};
+        ai.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        ai.allocationSize  = req.size;
+        ai.memoryTypeIndex = typeIdx;
+        VkCheck(vkAllocateMemory(_vkDevice, &ai, nullptr, &_dummySSBOMem), "vkAllocateMemory (dummy SSBO)");
+        VkCheck(vkBindBufferMemory(_vkDevice, _dummySSBO, _dummySSBOMem, 0), "vkBindBufferMemory (dummy SSBO)");
+
+        void* mapped = nullptr;
+        VkCheck(vkMapMemory(_vkDevice, _dummySSBOMem, 0, VK_WHOLE_SIZE, 0, &mapped), "vkMapMemory (dummy SSBO)");
+        memset(mapped, 0, 256);
+        vkUnmapMemory(_vkDevice, _dummySSBOMem);
+    }
+
+    // --- Dummy sampler ---
+    {
+        VkSamplerCreateInfo si{};
+        si.sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        si.magFilter    = VK_FILTER_LINEAR;
+        si.minFilter    = VK_FILTER_LINEAR;
+        si.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.maxLod       = VK_LOD_CLAMP_NONE;
+        VkCheck(vkCreateSampler(_vkDevice, &si, nullptr, &_dummySampler), "vkCreateSampler (dummy)");
+    }
+
+    Msg("* [VK] Dummy resources created");
+}
+
+void InternalDeviceVK::CreateDescriptorPool()
+{
+    PROF_EVENT("Vulkan: CreateDescriptorPool");
+
+    VkDescriptorPoolSize sizes[] = {
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,  СVKBindings::CBCount },
+        { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,   СVKBindings::SrvCount },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,  СVKBindings::SsboCount + СVKBindings::UserSsboCount },
+        { VK_DESCRIPTOR_TYPE_SAMPLER,         СVKBindings::SamplerCount },
+        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,   СVKBindings::UavCount },
+    };
+
+    VkDescriptorPoolCreateInfo info{};
+    info.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    info.maxSets       = 1;
+    info.poolSizeCount = static_cast<u32>(std::size(sizes));
+    info.pPoolSizes    = sizes;
+    info.flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    VkCheck(vkCreateDescriptorPool(_vkDevice, &info, nullptr, &_descriptorPool), "vkCreateDescriptorPool");
+
+    VkDescriptorSetAllocateInfo alloc{};
+    alloc.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    alloc.descriptorPool     = _descriptorPool;
+    alloc.descriptorSetCount = 1;
+    alloc.pSetLayouts        = &_setLayout;
+    VkCheck(vkAllocateDescriptorSets(_vkDevice, &alloc, &_dummySet), "vkAllocateDescriptorSets");
+}
+
+void InternalDeviceVK::InitDummyDescriptorSet()
+{
+    xr_vector<VkDescriptorBufferInfo> uboInfos(СVKBindings::CBCount);
+    xr_vector<VkDescriptorImageInfo>  srvInfos(СVKBindings::SrvCount);
+    xr_vector<VkDescriptorBufferInfo> ssboInfos(СVKBindings::SsboCount + СVKBindings::UserSsboCount);
+    xr_vector<VkDescriptorImageInfo>  samplerInfos(СVKBindings::SamplerCount);
+    xr_vector<VkDescriptorImageInfo>  uavInfos(СVKBindings::UavCount);
+    xr_vector<VkWriteDescriptorSet>   writes;
+    writes.reserve(СVKBindings::TotalBindings);
+
+    for (u32 i = 0; i < СVKBindings::CBCount; ++i)
+    {
+        uboInfos[i] = { _dummyUBO, 0, VK_WHOLE_SIZE };
+        VkWriteDescriptorSet w{}; w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = _dummySet; w.dstBinding = СVKBindings::CBBase + i; w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; w.pBufferInfo = &uboInfos[i];
+        writes.push_back(w);
+    }
+    for (u32 i = 0; i < СVKBindings::SrvCount; ++i)
+    {
+        srvInfos[i] = { VK_NULL_HANDLE, _dummyImageView, VK_IMAGE_LAYOUT_GENERAL };
+        VkWriteDescriptorSet w{}; w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = _dummySet; w.dstBinding = СVKBindings::SrvBase + i; w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE; w.pImageInfo = &srvInfos[i];
+        writes.push_back(w);
+    }
+    for (u32 i = 0; i < СVKBindings::SsboCount; ++i)
+    {
+        ssboInfos[i] = { _dummySSBO, 0, VK_WHOLE_SIZE };
+        VkWriteDescriptorSet w{}; w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = _dummySet; w.dstBinding = СVKBindings::SsboBase + i; w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w.pBufferInfo = &ssboInfos[i];
+        writes.push_back(w);
+    }
+    for (u32 i = 0; i < СVKBindings::SamplerCount; ++i)
+    {
+        samplerInfos[i] = { _dummySampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
+        VkWriteDescriptorSet w{}; w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = _dummySet; w.dstBinding = СVKBindings::SamplerBase + i; w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER; w.pImageInfo = &samplerInfos[i];
+        writes.push_back(w);
+    }
+    for (u32 i = 0; i < СVKBindings::UavCount; ++i)
+    {
+        uavInfos[i] = { VK_NULL_HANDLE, _dummyImageView, VK_IMAGE_LAYOUT_GENERAL };
+        VkWriteDescriptorSet w{}; w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = _dummySet; w.dstBinding = СVKBindings::UavBase + i; w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; w.pImageInfo = &uavInfos[i];
+        writes.push_back(w);
+    }
+    for (u32 i = 0; i < СVKBindings::UserSsboCount; ++i)
+    {
+        ssboInfos[СVKBindings::SsboCount + i] = { _dummySSBO, 0, VK_WHOLE_SIZE };
+        VkWriteDescriptorSet w{}; w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = _dummySet; w.dstBinding = СVKBindings::UserSsboBase + i; w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w.pBufferInfo = &ssboInfos[СVKBindings::SsboCount + i];
+        writes.push_back(w);
+    }
+
+    vkUpdateDescriptorSets(_vkDevice, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
+    Msg("* [VK] Dummy descriptor set: %u writes", static_cast<u32>(writes.size()));
+}
+
+void InternalDeviceVK::UpdatePipelineLayout()
+{
+    PROF_EVENT("Vulkan: UpdatePipelineLayout");
+
+    if (_uiPipelineLayout != VK_NULL_HANDLE)
+    {
+        vkDestroyPipelineLayout(_vkDevice, _uiPipelineLayout, nullptr);
+        _uiPipelineLayout = VK_NULL_HANDLE;
+    }
+    InvalidatePipelineCache();
+
+    VkPushConstantRange range{};
+    range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    range.offset     = 0;
+    range.size       = sizeof(_drawConstants);   // 96 байт (CBDraw)
+
+    VkPipelineLayoutCreateInfo info{};
+    info.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    info.setLayoutCount         = 1;
+    info.pSetLayouts            = &_setLayout;
+    info.pushConstantRangeCount = 1;
+    info.pPushConstantRanges    = &range;
+    VkCheck(vkCreatePipelineLayout(_vkDevice, &info, nullptr, &_uiPipelineLayout),
+            "vkCreatePipelineLayout (UI)");
+}
+
+void InternalDeviceVK::DestroyDescriptorObjects()
+{
+    if (_vkDevice == VK_NULL_HANDLE) return;
+
+    if (_dummySampler    != VK_NULL_HANDLE) vkDestroySampler   (_vkDevice, _dummySampler,    nullptr);
+    if (_dummySSBO       != VK_NULL_HANDLE) vkDestroyBuffer    (_vkDevice, _dummySSBO,       nullptr);
+    if (_dummySSBOMem    != VK_NULL_HANDLE) vkFreeMemory       (_vkDevice, _dummySSBOMem,    nullptr);
+    if (_dummyUBO        != VK_NULL_HANDLE) vkDestroyBuffer    (_vkDevice, _dummyUBO,        nullptr);
+    if (_dummyUBOMem     != VK_NULL_HANDLE) vkFreeMemory       (_vkDevice, _dummyUBOMem,     nullptr);
+    if (_dummyImageView  != VK_NULL_HANDLE) vkDestroyImageView (_vkDevice, _dummyImageView,  nullptr);
+    if (_dummyImage      != VK_NULL_HANDLE) vkDestroyImage     (_vkDevice, _dummyImage,      nullptr);
+    if (_dummyImageMem   != VK_NULL_HANDLE) vkFreeMemory       (_vkDevice, _dummyImageMem,   nullptr);
+    if (_descriptorPool  != VK_NULL_HANDLE) vkDestroyDescriptorPool     (_vkDevice, _descriptorPool, nullptr);
+    if (_setLayout       != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(_vkDevice, _setLayout,      nullptr);
+}
+
 static u64 HashPipelineKey(const InternalDeviceVK::PipelineKey& key)
 {
     // FNV-1a по байтам
@@ -874,25 +1257,7 @@ VkPipeline InternalDeviceVK::GetOrCreatePipeline()
         return it->second;
 
     // --- Создание layout (один на все UI pipeline) ---
-    if (_uiPipelineLayout == VK_NULL_HANDLE)
-    {
-        VkPushConstantRange range = {};
-        range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-        range.offset = 0;
-        range.size   = sizeof(_drawConstants); // 24 dword = 96 bytes
-
-        VkPipelineLayoutCreateInfo layoutInfo = {};
-        layoutInfo.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        layoutInfo.pushConstantRangeCount = 1;
-        layoutInfo.pPushConstantRanges    = &range;
-
-        VkResult r = vkCreatePipelineLayout(_vkDevice, &layoutInfo, nullptr, &_uiPipelineLayout);
-        if (r != VK_SUCCESS)
-        {
-            Msg("! [VK] vkCreatePipelineLayout (UI) failed: %d", (int)r);
-            return VK_NULL_HANDLE;
-        }
-    }
+	R_ASSERT2(_uiPipelineLayout != VK_NULL_HANDLE, "UI pipeline layout not created");
 
     // --- Shader stages ---
     xr_vector<VkPipelineShaderStageCreateInfo> stages;
@@ -1065,6 +1430,8 @@ void InternalDeviceVK::Draw(u32 VertexCount, u32 StartVertex)
     vkCmdPushConstants(cmd, _uiPipelineLayout,
         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         0, sizeof(_drawConstants), _drawConstants);
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+						_uiPipelineLayout, 0, 1, &_dummySet, 0, nullptr);
     vkCmdDraw(cmd, VertexCount, 1, StartVertex, 0);
     ++g_drawCalls;
 }
@@ -1089,6 +1456,8 @@ void InternalDeviceVK::DrawInstanced(u32 VertexCount, u32 InstanceCount, u32 Sta
     vkCmdPushConstants(cmd, _uiPipelineLayout,
         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         0, sizeof(_drawConstants), _drawConstants);
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+						_uiPipelineLayout, 0, 1, &_dummySet, 0, nullptr);
     vkCmdDraw(cmd, VertexCount, InstanceCount, StartVertex, StartInstance);
     ++g_drawCalls;
 }
@@ -1113,6 +1482,8 @@ void InternalDeviceVK::DrawIndexed(u32 IndexCount, u32 StartIndex, u32 BaseVerte
     vkCmdPushConstants(cmd, _uiPipelineLayout,
         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         0, sizeof(_drawConstants), _drawConstants);
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+						_uiPipelineLayout, 0, 1, &_dummySet, 0, nullptr);
     vkCmdDrawIndexed(cmd, IndexCount, 1, StartIndex, (s32)BaseVertex, 0);
     ++g_drawCalls;
 }
@@ -1137,6 +1508,8 @@ void InternalDeviceVK::DrawIndexedInstanced(u32 IndexCount, u32 InstanceCount, u
     vkCmdPushConstants(cmd, _uiPipelineLayout,
         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         0, sizeof(_drawConstants), _drawConstants);
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+						_uiPipelineLayout, 0, 1, &_dummySet, 0, nullptr);
     vkCmdDrawIndexed(cmd, IndexCount, InstanceCount, StartIndex, (s32)BaseVertex, StartInstance);
     ++g_drawCalls;
 }
@@ -1226,6 +1599,14 @@ void InternalDeviceVK::ResizeBuffers(u32 Width, u32 Height)
 	{
 		return;
 	}
+	
+	if (Width == _swapchainExtent.width &&
+		Height == _swapchainExtent.height &&
+		_vkSwapchain != VK_NULL_HANDLE)
+	{
+		// psCurrentVidMode/HalfTarget уже корректны из конструктора
+		return;
+	}
 
 	vkDeviceWaitIdle(_vkDevice);
 
@@ -1264,6 +1645,7 @@ void InternalDeviceVK::ResizeBuffers(u32 Width, u32 Height)
 	colorDesc.SampleDescCount = 1;
 
 	auto* colorSurface = new VkStubSurface(colorDesc);
+	
 	RenderRTV       = new VkStubRTV(colorSurface);
 	RenderTexture   = RenderRTV;
 	RenderSRV       = new VkStubSRV();
@@ -1317,7 +1699,8 @@ void InternalDeviceVK::Present()
 	dep.pImageMemoryBarriers    = &barrier;
 	vkCmdPipelineBarrier2(f.CommandBuffer, &dep);
 	
-	if ((_frame % 60) == 0 && (g_drawCalls || g_drawSkipped))
+	// if ((_frame % 60) == 0 && (g_drawCalls || g_drawSkipped))
+	if ((_frameSerial % 60) == 0 && (g_drawCalls || g_drawSkipped))
 	{
 		Msg("* [VK] Draw stats (frame %u): draws=%u skipped=%u", _frame, g_drawCalls, g_drawSkipped);
 		g_drawCalls = 0;
@@ -1724,7 +2107,10 @@ InternalDeviceVK::~InternalDeviceVK()
 	}
 	InvalidatePipelineCache();
 	
-	vkDestroyDevice(_vkDevice, nullptr);
+	DestroyDescriptorObjects();   // ← NEW
+
+	if (_vkDevice != VK_NULL_HANDLE)
+		vkDestroyDevice(_vkDevice, nullptr);
 	_vkDevice = VK_NULL_HANDLE;
 
 	// --- Validation messenger (до destroy instance!) ---

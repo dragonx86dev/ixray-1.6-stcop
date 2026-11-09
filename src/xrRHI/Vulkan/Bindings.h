@@ -1,7 +1,7 @@
 #pragma once
 #include <cstdint>
 
-class Bindings
+class СVKBindings
 {
 public:
 	static constexpr uint32_t CBBase        = 0;

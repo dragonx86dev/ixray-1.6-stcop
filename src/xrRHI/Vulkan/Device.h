@@ -153,6 +153,12 @@ private:
 	void CreateSwapchainImageViews();
 	void CreateFrameResources();
 	void CreateTriangleResources();
+	void CreateDescriptorSetLayout();
+	void CreateDummyResources();
+	void CreateDescriptorPool();
+	void InitDummyDescriptorSet();
+	void UpdatePipelineLayout();
+	void DestroyDescriptorObjects();
 
 	VkInstance _vkInstance = VK_NULL_HANDLE;
 	VkDevice _vkDevice = VK_NULL_HANDLE;
@@ -178,7 +184,18 @@ private:
 	VkPipeline       _trianglePipeline = VK_NULL_HANDLE;
 	VkPipelineLayout _triangleLayout = VK_NULL_HANDLE;
 	
-	
+	VkDescriptorSetLayout _setLayout      = VK_NULL_HANDLE;
+	VkDescriptorPool      _descriptorPool = VK_NULL_HANDLE;
+	VkDescriptorSet       _dummySet       = VK_NULL_HANDLE;
+
+	VkImage          _dummyImage    = VK_NULL_HANDLE;
+	VkDeviceMemory   _dummyImageMem = VK_NULL_HANDLE;
+	VkImageView      _dummyImageView = VK_NULL_HANDLE;
+	VkBuffer         _dummyUBO      = VK_NULL_HANDLE;
+	VkDeviceMemory   _dummyUBOMem   = VK_NULL_HANDLE;
+	VkBuffer         _dummySSBO     = VK_NULL_HANDLE;
+	VkDeviceMemory   _dummySSBOMem  = VK_NULL_HANDLE;
+	VkSampler        _dummySampler  = VK_NULL_HANDLE;
 	
 	CVKShader* _shaders[6] = {};
 	RHIObject* _inputLayout = nullptr;    // сохраняем как есть, layout пока не нужен (UI = vertex pulling)
