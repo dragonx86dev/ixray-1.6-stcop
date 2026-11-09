@@ -185,9 +185,40 @@ void CVKBuffer::SetIndexBuffer(bool is32bit, u32 offset)
 
 VkDescriptorBufferInfo CVKBuffer::GetDescriptorInfo() const
 {
-    VkDescriptorBufferInfo info = {};
-    info.buffer = _buffer;
-    info.offset = 0;
-    info.range  = _size;
-    return info;
+	VkDescriptorBufferInfo info = {};
+	info.buffer = _buffer;
+	info.offset = 0;
+	info.range  = _size;
+	return info;
+}
+
+CVKUnorderedAccessView::CVKUnorderedAccessView(CVKBuffer* buf, const RHIUAVDesc& /*desc*/)
+	: _buffer(buf)
+{
+	R_ASSERT2(buf, "[VK] CVKUnorderedAccessView: null buffer");
+	_buffer->AddRef();
+
+	_info = _buffer->GetDescriptorInfo();
+	_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+
+	Msg("* [VK] CVKUnorderedAccessView: buffer=%p size=%llu",
+		(void*)_info.buffer, (unsigned long long)_info.range);
+}
+
+CVKUnorderedAccessView::~CVKUnorderedAccessView()
+{
+	if (_buffer) _buffer->Release();
+}
+
+void CVKUnorderedAccessView::AddRef() { ++_refs; }
+
+u32 CVKUnorderedAccessView::Release()
+{
+	const u32 remaining = --_refs;
+	if (!remaining)
+	{
+		auto self = this;
+		xr_delete(self);
+	}
+	return remaining;
 }

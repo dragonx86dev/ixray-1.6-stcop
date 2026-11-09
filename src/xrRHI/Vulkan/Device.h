@@ -1,8 +1,11 @@
 #pragma once
 #include "../RHI.h"
 #include <vulkan/vulkan_core.h>
+
+#include "Bindings.h"
 #include "RHIDevice.h"
 #include "Shader.h"
+#include "Texture.h"
 
 struct LocalQueueFamilyIndices
 {
@@ -28,6 +31,7 @@ public:
 		ERHI_PRIMITIVE_TOPOLOGY topology = ERHI_PRIMITIVE_TOPOLOGY::TRIANGLE_LIST;
 		VkFormat rtvFormats[8] = {};
 		u32 rtvCount = 0;
+		u64 inputLayoutId = 0;
 	};
 	
 	class ContextLock
@@ -152,13 +156,16 @@ private:
 	void CreateSwapchain();
 	void CreateSwapchainImageViews();
 	void CreateFrameResources();
-	void CreateTriangleResources();
 	void CreateDescriptorSetLayout();
-	void CreateDummyResources();
 	void CreateDescriptorPool();
-	void InitDummyDescriptorSet();
+	void FillDescriptorSet(VkDescriptorSet set);
+	void CreateDummyResources();
 	void UpdatePipelineLayout();
+	VkPipeline GetOrCreatePipeline();
+	void InvalidatePipelineCache();
 	void DestroyDescriptorObjects();
+	void InitPushDescriptorWrites();
+	void FlushCbDraw();
 
 	VkInstance _vkInstance = VK_NULL_HANDLE;
 	VkDevice _vkDevice = VK_NULL_HANDLE;
@@ -168,8 +175,9 @@ private:
 	VkSwapchainKHR _vkSwapchain	= VK_NULL_HANDLE;
 	VkSurfaceKHR _vkSurface = VK_NULL_HANDLE;
 	VkDebugUtilsMessengerEXT _vkDebugMessenger = VK_NULL_HANDLE;
-	
 	VkPipelineCache _vkPipelineCache = VK_NULL_HANDLE;
+	
+	CVKTextureFactory* _textureFactory = nullptr;
 
 	VkFormat        _swapchainFormat     = VK_FORMAT_UNDEFINED;
 	VkColorSpaceKHR _swapchainColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
@@ -179,14 +187,16 @@ private:
 	xr_vector<VkImage>     _swapchainImages;
 	xr_vector<VkImageView> _swapchainImageViews;
 	
-	VkBuffer         _triangleVB     = VK_NULL_HANDLE;
-	VkDeviceMemory   _triangleVBMem  = VK_NULL_HANDLE;
-	VkPipeline       _trianglePipeline = VK_NULL_HANDLE;
-	VkPipelineLayout _triangleLayout = VK_NULL_HANDLE;
-	
 	VkDescriptorSetLayout _setLayout      = VK_NULL_HANDLE;
 	VkDescriptorPool      _descriptorPool = VK_NULL_HANDLE;
-	VkDescriptorSet       _dummySet       = VK_NULL_HANDLE;
+	
+	VkDescriptorPool _frameDescriptorPools[FrameCount] = {};
+	u32              _frameDescriptorSetUsed[FrameCount] = {};
+
+	// dummy 3D image (s_blue_noise и т.п.)
+	VkImage          _dummyImage3D    = VK_NULL_HANDLE;
+	VkDeviceMemory   _dummyImage3DMem = VK_NULL_HANDLE;
+	VkImageView      _dummyImageView3D = VK_NULL_HANDLE;
 
 	VkImage          _dummyImage    = VK_NULL_HANDLE;
 	VkDeviceMemory   _dummyImageMem = VK_NULL_HANDLE;
@@ -196,6 +206,26 @@ private:
 	VkBuffer         _dummySSBO     = VK_NULL_HANDLE;
 	VkDeviceMemory   _dummySSBOMem  = VK_NULL_HANDLE;
 	VkSampler        _dummySampler  = VK_NULL_HANDLE;
+	
+	VkBuffer         _cbDrawUBO    = VK_NULL_HANDLE;
+	VkDeviceMemory   _cbDrawUBOMem = VK_NULL_HANDLE;
+	void*            _cbDrawMapped = nullptr;
+	bool             _cbDrawDirty  = false;
+	
+	static constexpr u32 kCbSlotSize = 4096;
+	VkBuffer         _cbUBO[СVKBindings::CBCount]     = {};
+	VkDeviceMemory   _cbUBOMem[СVKBindings::CBCount]  = {};
+	void*            _cbUBOMapped[СVKBindings::CBCount] = {};
+	u32              _cbUBOSize[СVKBindings::CBCount] = {};
+
+	// Постоянные write/info-структуры для vkCmdPushDescriptorSet
+	xr_vector<VkWriteDescriptorSet>   _pushWrites;       // 110
+	xr_vector<VkDescriptorBufferInfo> _pushCbInfo;       // 14
+	xr_vector<VkDescriptorImageInfo>  _pushSrvInfo;      // 57
+	xr_vector<VkDescriptorBufferInfo> _pushSsboInfo;     // 7
+	xr_vector<VkDescriptorImageInfo>  _pushSamplerInfo;  // 16
+	xr_vector<VkDescriptorImageInfo>  _pushUavInfo;      // 8
+	xr_vector<VkDescriptorBufferInfo> _pushUserSsboInfo; // 8
 	
 	CVKShader* _shaders[6] = {};
 	RHIObject* _inputLayout = nullptr;    // сохраняем как есть, layout пока не нужен (UI = vertex pulling)
@@ -210,9 +240,9 @@ private:
 
 	xr_hash_map<u64, VkPipeline> _pipelineCache;
 	VkPipelineLayout _uiPipelineLayout = VK_NULL_HANDLE;   // layout с push-constants (для будущих UI-шейдеров)
-
-	VkPipeline GetOrCreatePipeline();
-	void       InvalidatePipelineCache();
+	
+	VkCommandPool      _loadCmdPool = VK_NULL_HANDLE;
+	xrCriticalSection  _loadMutex;
 	
 	LocalQueueFamilyIndices _queueFamilies;
 	

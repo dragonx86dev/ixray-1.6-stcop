@@ -1,5 +1,4 @@
 #pragma once
-
 #include "../RHI.h"
 #include <vulkan/vulkan.h>
 #include <atomic>
@@ -53,4 +52,25 @@ private:
 	u32  _vbOffset  = 0;
 	bool _ibIs32Bit = false;
 	u32  _ibOffset  = 0;
+};
+
+class CVKUnorderedAccessView final : public IRHIUnorderedAccessView
+{
+public:
+	CVKUnorderedAccessView(CVKBuffer* buf, const RHIUAVDesc& desc);
+	~CVKUnorderedAccessView() override;
+
+	void* GetRaw() override { return this; }
+	void  AddRef() override;
+	u32   Release() override;
+
+	const VkDescriptorBufferInfo& GetBufferInfo()     const { return _info; }
+	VkDescriptorType              GetDescriptorType() const { return _type; }
+	CVKBuffer*                    GetBuffer()         const { return _buffer; }
+
+private:
+	CVKBuffer* _buffer = nullptr;
+	VkDescriptorBufferInfo _info{};
+	VkDescriptorType _type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	std::atomic<u32> _refs{ 1 };
 };

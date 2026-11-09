@@ -257,7 +257,7 @@ HRESULT RHI_DxcCompileSPIRV(const void* source, size_t size, const char* name, c
 		arguments.push_back(regName);
 		arguments.push_back(L"0");
 		arguments.push_back(std::to_wstring(binding));
-		arguments.push_back(L"1");
+		arguments.push_back(L"0");
 	};
 
 	for (int i = 0; i < 14; ++i) addBinding(L"b", i, i);        // cbuffers
