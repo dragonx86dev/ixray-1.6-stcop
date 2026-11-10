@@ -69,7 +69,6 @@ private:
 	typedef FHierrarhyVisual	inherited;
 	friend class				CBoneData;
 	friend class				CSkeletonX;
-	friend class				SkeletonBatch;
 
 
 	xr_vector<shared_str>		L_parents;
@@ -124,9 +123,9 @@ protected:
 	s32							UCalc_Visibox			;
 	u32							Visibox_frame = 0;
 	u32							TracksTime = 0;			// RDEVICE.dwTimeGlobal of the last OnCalculateBones
-	u32							BatchMarker = 0;		// SkeletonBatch that already holds this skeleton
 	// Guards bone calculation and bone reads that need a whole matrix. See SkeletonRigid.cpp for the wait rules.
 	xrCriticalSection			UCalc_Mutex;
+	xrCriticalSection			UCalc_Mutex2;
 
 	VisMask						visimask;
     
@@ -211,8 +210,17 @@ public:
 	ICF virtual Fmatrix&			_BCL	LL_GetTransform		(u16 bone_id) override {	return LL_GetBoneInstance(bone_id).mTransform;					}
 	ICF virtual const Fmatrix&		_BCL	LL_GetTransform		(u16 bone_id) const override {	return LL_GetBoneInstance(bone_id).mTransform;					}
 
-	virtual void					_BCL	LL_GetBoneLocalPosition(u16 bone_id, Fvector& result) override;
-	virtual void					_BCL	LL_GetBoneLocalTransform(u16 bone_id, Fmatrix& result) override;
+	virtual void					_BCL	LL_GetBoneLocalPosition(u16 bone_id, Fvector& result) override
+	{
+		xrCriticalSectionGuard g(UCalc_Mutex);
+		result = LL_GetBoneInstance(bone_id).mTransform.c;
+	}
+
+	virtual void					_BCL	LL_GetBoneLocalTransform(u16 bone_id, Fmatrix& result) override
+	{
+		xrCriticalSectionGuard g(UCalc_Mutex);
+		result = LL_GetBoneInstance(bone_id).mTransform;
+	}
 
 	ICF virtual void				_BCL	LL_GetBoneWorldPosition	(u16 bone_id, const Fmatrix& xform, Fvector& result) override
 	{

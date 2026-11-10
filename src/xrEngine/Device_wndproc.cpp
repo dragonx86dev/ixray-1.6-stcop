@@ -200,12 +200,15 @@ bool CRenderDevice::on_event	(SDL_Event& Event)
 	switch (Event.type)
 	{
 		case SDL_EVENT_WINDOW_MOUSE_ENTER:
-		{	OnWM_Activate(true, false);
-			break;
-		}
 		case SDL_EVENT_WINDOW_MOUSE_LEAVE:
 		{
-			OnWM_Activate(false, false);
+#ifdef IXR_WINDOWS
+			if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+			{
+				break;
+			}
+#endif
+			OnWM_Activate(Event.type == SDL_EVENT_WINDOW_MOUSE_ENTER, false);
 			break;
 		}
 		case SDL_EVENT_WINDOW_SHOWN:
@@ -260,6 +263,7 @@ bool CRenderDevice::on_event	(SDL_Event& Event)
 		}
 		case SDL_EVENT_MOUSE_MOTION:
 		{
+			CImGuiManager::Instance().AddMouseLook(Event.motion.xrel, Event.motion.yrel);
 			if (!pInput->GetControllerMode())
 			{
 				pInput->MouseMotion(Event.motion.xrel, Event.motion.yrel);

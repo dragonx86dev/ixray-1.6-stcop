@@ -85,6 +85,7 @@ public:
 		u32 SslrHq : 1;
 		u32 dx11_enable_tessellation : 1;
 		u32 dx11_disable_motion_vectors : 1;
+		u32 DofCompiled : 1;
 		u32 dx11_allow_wboit_transparency : 1;
 	} o;
 
@@ -117,7 +118,6 @@ public:
 	xr_array<R_dsgraph_structure, 6> GraphReflection;
 	xr_array<R_dsgraph_structure, 3> GraphSun;
 	R_dsgraph_structure GraphRain;
-	R_dsgraph_structure GraphMainStatic;	// static part of the main scene, moved to GraphMain after the task
 	R_dsgraph_structure GraphUI;	// 3D icons: reads the camera UI3dStatic sets for the icon
 	R_dsgraph_structure GraphPass;	// primary thread passes that follow one another: lights, puddles
 
@@ -137,7 +137,6 @@ public:
 		}
 		Function(GraphRain);
 		Function(GraphPass);
-		Function(GraphMainStatic);
 		Function(GraphUI);
 	}
 
@@ -245,13 +244,6 @@ public:
 	GraphView MakeGraphView(u32 Phase) const;
 	// Starts a collection into the main graph with the current camera and phase
 	void BeginMainCollect(bool ZFill = false);
-	void PrepareMainScene();
-	void TraverseMainSectors(bool ZFill);
-	void LaunchMainStatic(const GraphView& View, bool ForwardTogether, bool SingleSector);
-	void JoinMainStatic();
-	xr_task_group MainStaticTask;
-	bool MainStaticRunning = false;
-	bool MainScenePrepared = false;
 	GraphView SunView;
 
 	// Graphs the pre-render stage collects in this frame, in order. The primary thread only waits
@@ -468,7 +460,6 @@ public:
 	bool get_texture_metadata(const char* absolute_path, RHITextureMetadata* p_data) override;
 
 	IRHISurface* texture_load(const char*	fname, u32& msize, bool bStaging = false);
-	ERHI_FORMAT PeekTextureFormat(const char* Name);
 
 	HRESULT							shader_compile			(
 		const char*							name,
@@ -597,6 +588,7 @@ public:
 	bool							NeedMotionVectors			() const;
 	bool							MotionVectorsDisabled		() const;
 	void							SyncMotionVectors			();
+	void							SyncDof						();
 	void							SyncReflections				();
 
 	virtual bool					InIndoor					() override { return pLastSector!=pOutdoorSector; };

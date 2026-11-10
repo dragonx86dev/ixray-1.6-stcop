@@ -35,6 +35,9 @@ public:
 	bool CanCacheShadow(bool& Pending, u64& Revision);
 	u64 GetShadowCacheRevision() const { return ShadowCacheRevision.load(std::memory_order_relaxed); }
 	void WaitForLoad();
+	void EnsureLoaded();
+	bool IsLoadPending() const { return IsLoading.load(std::memory_order_acquire); }
+	void AllowPlaceholder() { Sampled2D.store(true, std::memory_order_release); }
 	void								PostLoad		();
 	void								Unload			(void);
 	void								CreateEmpty(u32 w, u32 h);
@@ -49,20 +52,20 @@ public:
 	}
 	IC u32 get_Width()
 	{
-		WaitForLoad();
-		return pSurface->GetWidth();
+		EnsureLoaded();
+		return pSurface ? pSurface->GetWidth() : 0;
 	}
 	IC u32 get_Height()
 	{
-		WaitForLoad();
-		return pSurface->GetHeight();
+		EnsureLoaded();
+		return pSurface ? pSurface->GetHeight() : 0;
 	}
 	IC ERHI_FORMAT get_Format()
 	{
 		WaitForLoad();
 		return pSurface ? pSurface->GetFormat() : ERHI_FORMAT::UNKNOWN;
 	}
-	ERHI_FORMAT PeekFormat();
+	bool BindsBC1() const;
 
 	void								video_Sync		(u32 _time){m_play_time=_time;}
 	void								video_Play		(bool looped, u32 _time=0xFFFFFFFF);
@@ -79,10 +82,16 @@ private:
 	xrCriticalSection LoadGuard;
 	xr_unique_ptr<xr_task_group> LoadTask;
 	xr_atomic_bool IsLoading = false;
+	xr_atomic_bool LoadDone = false;
+	xr_atomic_bool LoadCancelled = false;
+	xr_atomic_bool Sampled2D = false;
 	xr_atomic_u64 ShadowCacheRevision = 0;
-	void FinishLoading();
+	resptr_core<CTexture, resptr_base<CTexture>> Placeholder;
+	void FinishLoading(bool Discard = false);
+	bool ShowsPlaceholder() const;
 	void LoadImpl();
 
+	static void							ApplyView(u32 dwStage, IRHIShaderResourceView* View);
 	void								Apply(u32 dwStage);
 	void								ProcessStaging();
 

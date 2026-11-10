@@ -166,6 +166,7 @@ void CRender::create()
 	o.SslrHq = ps_r2_ls_flags_ext.test(R4FLAG_SSLR_HQ);
 
 	o.dx11_disable_motion_vectors = MotionVectorsDisabled();
+	o.DofCompiled = ps_r2_ls_flags.test(R2FLAG_DOF);
 
 	o.dx11_allow_wboit_transparency = LightingModeIsDynamicRender() && !!EngineExternal().ShadersOptions.contains(xr_string("ALLOW_WBOIT_TRANSPARENCY"));
 
@@ -620,7 +621,7 @@ ShaderExternalMap CRender::GetShaderDefines(const ShaderExternalMap& Defines) co
 		{ !!o.GtaoHq, "USE_GTAO_HQ", "1" },
 		{ !!o.SslrHq, "USE_SSLR_HQ", "1" },
 		{ Dynamic && ps_r2_ls_flags.test(R2FLAG_SOFT_PARTICLES), "USE_SOFT_PARTICLES", "1" },
-		{ Dynamic && ps_r2_ls_flags.test(R2FLAG_DOF), "USE_DOF", "1" },
+		{ Dynamic && o.DofCompiled, "USE_DOF", "1" },
 		{ Dynamic && ps_r2_ls_flags_ext.test(R4FLAG_SCREEN_SPACE_HUD_SHADOWS), "USE_HUD_SHADOWS", "1" },
 		{ Dynamic && ps_r2_ls_flags_ext.test(R4FLAG_HASHED_ALPHA_TEST), "USE_HASHED_AREF", "1" },
 		{ Dynamic && ps_r2_ls_flags_ext.test(R4FLAG_SSLR_ON_WATER), "USE_SSLR_ON_WATER", "1" },
@@ -707,6 +708,15 @@ void CRender::SyncMotionVectors()
 	dxRenderDeviceRender::Instance().Resources->RecompileShaders();
 }
 
+void CRender::SyncDof()
+{
+	if (o.DofCompiled == ps_r2_ls_flags.test(R2FLAG_DOF))
+		return;
+
+	o.DofCompiled = !o.DofCompiled;
+	dxRenderDeviceRender::Instance().Resources->RecompileShaders();
+}
+
 void CRender::SetShaderCacheBypass(bool bypass)
 {
 	m_shaderCacheBypass = bypass;
@@ -763,6 +773,24 @@ static HRESULT create_shader(
 			Msg("! PS: %s", file_name);
 			Msg("! CreatePixelShader hr == 0x%08x", _result);
 			return		E_FAIL;
+		}
+
+		sps_result->Texture2DSlots = 0;
+		RHIShaderReflection reflection;
+		if (SUCCEEDED(GRHI->ReflectShader(buffer, buffer_size, reflection)))
+		{
+			for (const RHIShaderResourceDesc& Resource : reflection.Resources)
+			{
+				if (Resource.Type != ERHI_SHADER_RESOURCE_TYPE::TEXTURE || Resource.Dimension != ERHI_SRV_DIMENSION::TEXTURE2D)
+				{
+					continue;
+				}
+
+				for (u32 Slot = Resource.BindPoint; Slot < Resource.BindPoint + Resource.BindCount && Slot < 64; ++Slot)
+				{
+					sps_result->Texture2DSlots |= 1ull << Slot;
+				}
+			}
 		}
 
 		_result = S_OK;

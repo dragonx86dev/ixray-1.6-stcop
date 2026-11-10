@@ -4,7 +4,6 @@
 #include "../../xrCore/Collision/ISpatial.h"
 #include "../../xrCore/Containers/_stl_extensions.h"
 #include "r__dsgraph_types.h"
-#include "SkeletonBatch.h"
 
 #ifdef RENDER_API_IMPORTS
 class CSector;
@@ -148,9 +147,6 @@ public:
 	};
 	xr_vector<SubspaceItem>										SubspaceDynamic;
 
-	// Skeletons of the current pass, calculated while static geometry is traversed
-	SkeletonBatch												SkeletonUpdates;
-
 	bool b_loaded;
 	CPortalTraverser PortalTraverser;
 	xr_hash_set<void*> private_visuals;
@@ -200,8 +196,6 @@ public:
 	void		r_dsgraph_clear_aux();
 	void		r_dsgraph_clear_passes();
 	void		add_Static(dxRender_Visual* pVisual, u32 planes);
-	void		CaptureStaticFrom(CPortalTraverser& Traverser);
-	void		TakeStatic(R_dsgraph_structure& Static);
 
 	// IDSGraphManager
 	void add_Static(IRenderVisual* Visual, CFrustum& Frustum, u32 Planes) override;

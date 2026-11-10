@@ -175,10 +175,13 @@ void CRenderDevice::on_idle		()
 
 	Device.BeginRender();
 	const bool Minimized = SDL_GetWindowFlags(g_AppInfo.Window) & SDL_WINDOW_MINIMIZED;
-	const bool Focus = !s_StartupActive && (psDeviceFlags.test(rsFullscreen) || (!Minimized && !IsMainMenuActive && !CImGuiManager::Instance().IsCapturingInputs()));
+	const bool Focus = !s_StartupActive && !Minimized && SDL_GetKeyboardFocus() == g_AppInfo.Window &&
+					   !CImGuiManager::Instance().IsCapturingInputs() && (psDeviceFlags.test(rsFullscreen) || !IsMainMenuActive);
 
-	SDL_SetWindowMouseGrab(g_AppInfo.Window, !g_dedicated_server && !Autotest::Active() && Focus);
-	SDL_SetWindowRelativeMouseMode(g_AppInfo.Window, !g_dedicated_server && !Autotest::Active() && Focus);
+	const bool IsLooking = CImGuiManager::Instance().IsMouseLook();
+	const bool IsRelative = IsLooking || (Focus && !CImGuiManager::Instance().IsCapturingInputs());
+	SDL_SetWindowMouseGrab(g_AppInfo.Window, !g_dedicated_server && !Autotest::Active() && (Focus || IsLooking));
+	SDL_SetWindowRelativeMouseMode(g_AppInfo.Window, !g_dedicated_server && !Autotest::Active() && IsRelative);
 
 	g_bEnableStatGather = psDeviceFlags.test(rsStatistic);
 
@@ -373,6 +376,18 @@ void CRenderDevice::message_loop()
 
 		if (!quiting)
 		{
+#ifdef IXR_WINDOWS
+			if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+			{
+				const bool IsMinimized = (SDL_GetWindowFlags(g_AppInfo.Window) & SDL_WINDOW_MINIMIZED) != 0;
+				const bool IsFocused = CImGuiManager::Instance().IsFocused();
+				const bool IsActive = psDeviceFlags.test(rsDeviceActive) || (IsFocused && !IsMinimized);
+				if (IsActive != b_is_Active)
+				{
+					OnWM_Activate(IsFocused, IsMinimized);
+				}
+			}
+#endif
 			on_idle();
 		}
 	}

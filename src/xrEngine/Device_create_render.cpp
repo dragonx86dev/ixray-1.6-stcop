@@ -1,6 +1,7 @@
 #include "stdafx.h"
 
 #include "imgui_impl_sdl3.h"
+#include "imgui_internal.h"
 #include "IGame_Persistent.h"
 #include "Autotest.h"
 
@@ -24,8 +25,9 @@ void DrawMainViewport()
 
 	ImGui::SetNextWindowPos(Viewport->Pos);
 	ImGui::SetNextWindowSize(ImVec2((float)Device.TargetWidth, (float)Device.TargetHeight));
-	if (ImGui::Begin("Main", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs))
+	if (ImGui::Begin("Main", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoFocusOnAppearing))
 	{
+		ImGui::BringWindowToDisplayBack(ImGui::GetCurrentWindow());
 		ImGui::SetCursorPos(ImVec2(0, 0));
 		ImGui::GetWindowDrawList()->AddRect(Viewport->Pos, ImVec2((float)Device.TargetWidth + Viewport->Pos.x, (float)Device.TargetHeight + Viewport->Pos.y), 0xFFFFFFFF);
 		ImGui::SetCursorPos(ImVec2(0, 0));
@@ -181,6 +183,7 @@ bool CRenderDevice::InitRenderDevice(ERHI_API_LAYER API)
 				ImGui::MenuItem("Cutscene Adjust", nullptr, &States[static_cast<u8>(EditorUI::CutsceneAdjust)]);
 				if (ImGui::BeginMenu("Editors##InGame"))
 				{
+					ImGui::MenuItem("Cinema Editor", nullptr, &States[static_cast<u8>(EditorUI::Game_CinemaEditor)]);
 					ImGui::MenuItem("Weather Editor", nullptr, &States[static_cast<u8>(EditorUI::Weather)]);
 					ImGui::MenuItem("Detail Layers Editor", nullptr, &States[static_cast<u8>(EditorUI::Tools_DetailLayersEditor)]);
 					ImGui::MenuItem("AI Grid Editor", nullptr, &States[static_cast<u8>(EditorUI::Tools_AIGridEditor)]);

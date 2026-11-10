@@ -27,6 +27,9 @@ private:
 
 	bool DrawUIRender = true;
 	bool CaptureInputs = false;
+	bool HasPlatformWindowFocus = false;
+	bool MouseLook = false;
+	ImVec2 MouseLookDelta = ImVec2(0.0f, 0.0f);
 
 public:
 	ImGuiCallback PlatformInitCallback = nullptr;
@@ -53,6 +56,11 @@ public:
 
 	void UpdateCapture();
 	bool IsCapturingInputs() const;
+	bool IsFocused() const;
+	void SetMouseLook(bool IsEnabled);
+	bool IsMouseLook() const;
+	void AddMouseLook(float X, float Y);
+	ImVec2 TakeMouseLook();
 
 	void NewPlatformFrame() const;
 	void NewHardwareFrame() const;
