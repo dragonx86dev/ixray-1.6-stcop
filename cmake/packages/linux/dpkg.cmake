@@ -7,7 +7,7 @@ find_program(APT_EXECUTABLE apt REQUIRED)
 # ------------------------------------------------------------------------------
 
 execute_process(
-    COMMAND bash -c "apt-cache search '^clang-[0-9]+$' | sed 's/clang-//' | sort -V | tail -n1"
+    COMMAND bash -c "apt-cache search --names-only '^clang-[0-9]+$' | cut -d' ' -f1 | sed 's/clang-//' | sort -V | tail -n1"
     OUTPUT_VARIABLE CLANG_VERSION
     OUTPUT_STRIP_TRAILING_WHITESPACE
 )
